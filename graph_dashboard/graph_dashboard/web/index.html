@@ -1,0 +1,1305 @@
+<!DOCTYPE html>
+<!--
+  Copyright 2026 JB
+
+  Use of this source code is governed by an MIT-style
+  license that can be found in the LICENSE file or at
+  https://opensource.org/licenses/MIT.
+
+  Static ROS-graph view (rqt_graph-style): ellipses = nodes, boxes = topics,
+  arrows = pub/sub direction, with a live overlay (running nodes lit, others
+  dimmed, live-only nodes dotted) and hover chain highlighting. Rendered
+  with the vendored vis-network (see web/vis-network.min.js banner for its
+  MIT/Apache-2.0 dual license).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>graph_dashboard — static ROS graph</title>
+<script src="/vendor/vis-network.min.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+  #topbar {
+    padding: 8px 14px; background: #263238; color: #eceff1;
+    display: flex; gap: 18px; align-items: baseline; flex-wrap: wrap;
+  }
+  #topbar h1 { font-size: 16px; margin: 0; }
+  #summary { font-size: 13px; color: #b0bec5; }
+  #livechip {
+    font-size: 12px; padding: 2px 10px; border-radius: 10px;
+    background: #546e7a; color: #eceff1;
+  }
+  #livechip.on { background: #2e7d32; }
+  #legend {
+    display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px;
+    padding: 6px 14px; background: #eceff1; color: #263238; align-items: center;
+  }
+  .chip { display: inline-flex; align-items: center; gap: 5px; }
+  .swatch { width: 14px; height: 14px; border-radius: 50%; border: 1px solid #607d8b; }
+  .swatch.box { border-radius: 2px; background: #fff; }
+  .swatch.dashed { border-style: dashed; background: #fff; }
+  .swatch.running { border: 3px solid #1b5e20; background: #a5d6a7; }
+  .swatch.dim { background: #cfd8dc; border-color: #b0bec5; }
+  .swatch.liveonly { border: 2px dotted #607d8b; background: #eceff1; }
+  .chip.toggle { cursor: pointer; user-select: none; border-radius: 4px; padding: 1px 5px; }
+  .chip.toggle:hover { background: #cfd8dc; }
+  .chip.toggle.off { opacity: 0.4; text-decoration: line-through; }
+  #focusinfo { color: #b0bec5; margin-left: 14px; font-family: monospace; }
+  #main { height: calc(100% - 92px); display: flex; flex-direction: column; }
+  #graph { flex: 1 1 50%; min-height: 0; }
+  #focuswrap {
+    flex: 1 1 50%; min-height: 0; display: none; flex-direction: column;
+    border-top: 2px solid #263238;
+  }
+  #focuswrap.open { display: flex; }
+  #focusbar {
+    padding: 4px 12px; background: #37474f; color: #eceff1; font-size: 13px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  #focusclose {
+    background: none; border: none; color: #eceff1; font-size: 15px;
+    cursor: pointer; padding: 0 4px;
+  }
+  #focusclose:hover { color: #ef9a9a; }
+  #focusbody { flex: 1; min-height: 0; display: flex; }
+  #focusgraph { flex: 1; min-height: 0; }
+  #tapstrip {
+    display: none; flex: 0 0 50%; box-sizing: border-box; overflow: auto;
+    padding: 10px 14px; background: #eceff1;
+    border-left: 2px solid #90a4ae; font-size: 15px;
+  }
+  #tapstatus { font-family: monospace; font-size: 15px; color: #263238; }
+  #tapnote { color: #78909c; font-size: 13px; margin-top: 4px; }
+  #tapimg {
+    display: none; max-width: 100%; border: 1px solid #607d8b; margin-top: 8px;
+  }
+  #tapdepth {
+    display: none; font-family: monospace; font-size: 13px; color: #37474f; margin-top: 4px;
+  }
+  #tapcloud {
+    display: none; max-width: 100%; border: 1px solid #607d8b; margin-top: 8px;
+    background: #10151a; cursor: grab; touch-action: none;
+  }
+  #tapcloud.dragging { cursor: grabbing; }
+  #tapcloudcaption {
+    display: none; font-family: monospace; font-size: 13px; color: #37474f; margin-top: 4px;
+  }
+  #tapcloudhelp {
+    display: none; font-size: 11px; color: #78909c; margin-top: 2px;
+  }
+  #tapcolormode {
+    display: none; font-size: 12px; color: #37474f; margin-top: 4px;
+  }
+  #tapcolormode .modechip {
+    cursor: pointer; user-select: none; padding: 1px 7px; border-radius: 4px;
+    border: 1px solid #90a4ae; margin-left: 4px;
+  }
+  #tapcolormode .modechip.active { background: #263238; color: #eceff1; border-color: #263238; }
+  #tapcolorauto { color: #78909c; margin-left: 6px; }
+  #tapfields {
+    display: none; margin: 8px 0 0; font-size: 14px; font-family: monospace;
+    white-space: pre-wrap; color: #37474f;
+  }
+</style>
+</head>
+<body>
+<div id="topbar">
+  <h1>graph_dashboard — static ROS graph (declared in source, not live)</h1>
+  <span id="summary">loading…</span>
+  <span id="livechip">live: …</span>
+</div>
+<div id="legend">
+  <span class="chip"><span class="swatch" style="background:#ccc"></span>node, colored by package</span>
+  <span class="chip"><span class="swatch box"></span>topic</span>
+  <span class="chip"><span class="swatch running"></span>running now</span>
+  <span class="chip"><span class="swatch dim"></span>declared, not running</span>
+  <span class="chip"><span class="swatch liveonly"></span>live-only (not in source scan)</span>
+  <span class="chip"><span class="swatch dashed"></span>dashed = test/bench harness</span>
+  <span class="chip"><span class="swatch" style="border:2.5px solid #1a237e;background:#cfd8dc"></span>dark ring = C++ node</span>
+  <span class="chip">hover = light full chain · click = focus panel</span>
+  <span id="pkg-chips"></span>
+  <span class="chip toggle" id="tests-toggle" title="hide/show dashed test-harness elements">hide test harnesses</span>
+  <span class="chip toggle" id="transport-toggle"
+        title="hide/show image_transport derivative topics (.../compressed, .../compressedDepth, .../theora, .../zstd) — auto-generated plumbing, 4+ per image topic">hide transport variants</span>
+  <span class="chip toggle" id="active-toggle"
+        title="toggle between every declared node in the package and only the ones currently active (running, or live-only) — needs the live overlay">hide idle nodes</span>
+</div>
+<div id="main">
+  <div id="graph"></div>
+  <div id="focuswrap">
+    <div id="focusbar">
+      <span><span id="focustitle"></span><span id="focusinfo"></span></span>
+      <button id="focusclose" title="close (Esc)">✕</button>
+    </div>
+    <div id="focusbody">
+      <div id="focusgraph"></div>
+      <div id="tapstrip">
+        <span id="tapstatus"></span>
+        <div id="tapnote">note: this data tab is polled at 2 Hz — each poll shows only the
+          newest message, so the view updates slower than the topic. The Hz / bandwidth
+          above are the topic's TRUE measured rate, not the display rate.</div>
+        <img id="tapimg" alt="latest message thumbnail">
+        <div id="tapdepth"></div>
+        <canvas id="tapcloud" width="440" height="360"></canvas>
+        <div id="tapcolormode">color:
+          <span class="modechip" data-mode="rgb">rgb</span>
+          <span class="modechip" data-mode="depth">depth</span>
+          <span id="tapcolorauto"></span>
+        </div>
+        <div id="tapcloudcaption"></div>
+        <div id="tapcloudhelp">drag = orbit · wheel = zoom · shift-drag / right-drag = pan</div>
+        <pre id="tapfields"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+"use strict";
+// One fixed color per package, assigned in sorted-package order so colors
+// are stable across reloads.
+const PALETTE = ["#90caf9", "#a5d6a7", "#ffcc80", "#ce93d8", "#ef9a9a",
+                 "#80cbc4", "#fff59d", "#bcaaa4", "#b0bec5", "#f48fb1"];
+
+function hexToRgba(hex, alpha) {
+  const v = parseInt(hex.slice(1), 16);
+  return `rgba(${(v >> 16) & 255},${(v >> 8) & 255},${v & 255},${alpha})`;
+}
+
+// ---------------------------------------------------------------- state
+let network = null;
+let nodesDS = null, edgesDS = null;
+let base = {};        // id -> base style/meta for every static element
+let closures = {};    // id -> {up: [...], down: [...]}
+let staticEdges = []; // scanner edges with vis ids
+let liveAvail = false;
+let runningIds = new Set();   // static node ids currently running
+let liveTopicIds = new Set(); // static topic ids with live endpoints
+let liveOnlyIds = new Set();  // ids of live-only nodes/topics, synthesized into base
+let chain = null;             // {set: Set, edges: Set} while a chain is lit
+let mainPos = {};             // current layout coordinates (static + live-only; reused by the panel)
+let focusNet = null, focusNodesDS = null;
+let focusId = null, focusEgo = null;
+let hiddenPkgs = new Set();   // package filter (main graph only)
+let hideTests = false;        // test-harness filter (main graph only)
+let hideTransport = true;     // image_transport derivative-topic filter — noisy, hidden by default
+let showActiveOnly = false;   // all-nodes-in-package (default) vs. active-nodes-only view
+let topicTouchers = {};       // topic id -> Set of static node ids on it
+let staticElementIds = [];    // node/topic ids from the static scan (layout recompute input)
+let staticLayoutEdges = [];   // static scan edges (layout recompute input)
+let liveOnlySetSig = "";      // sorted-joined live-only id set — gates re-layout (no per-poll jitter)
+let liveEdges = [];           // live pub/sub edges currently drawn on the main graph (dashed)
+let staticSummary = null;     // last /api/graph summary, for the "+N live" header line
+
+// image_transport auto-generates these per image topic (4+ variants) —
+// pure plumbing noise in the graph view, collapsed behind a legend chip.
+const _TRANSPORT_SUFFIXES = ["/compressed", "/compressedDepth", "/theora", "/zstd"];
+function isTransportVariant(name) {
+  return _TRANSPORT_SUFFIXES.some(sfx => name.endsWith(sfx));
+}
+function countTransportTopics() {
+  return Object.keys(base).filter(
+    id => base[id].kind === "topic" && isTransportVariant(base[id].name)).length;
+}
+
+function countLiveOnly(kind) {
+  return Object.keys(base).filter(id => base[id].liveOnly && base[id].kind === kind).length;
+}
+
+// A node counts as "active" for the all-vs-active toggle when it's either
+// running-matched (declared AND currently live) or live-only (exists in
+// the picture only because it's running right now — there's no "idle"
+// state for those). Declared-but-idle nodes are the only ones this hides.
+function isActiveNode(id) {
+  const b = base[id];
+  return !!b && b.kind === "node" && (b.liveOnly || runningIds.has(id));
+}
+function updateSummaryLine() {
+  if (!staticSummary) return;
+  const s = staticSummary;
+  const liveNodeSuffix = liveAvail ? ` (+${countLiveOnly("node")} live)` : "";
+  const liveTopicSuffix = liveAvail ? ` (+${countLiveOnly("topic")} live)` : "";
+  document.getElementById("summary").textContent =
+    `${s.node_count} nodes${liveNodeSuffix} · ${s.topic_count} topics${liveTopicSuffix} · ` +
+    `${s.edge_count} edges · ${s.dynamic_topic_count} dynamic names · ${s.files_scanned} files scanned`;
+}
+
+function esc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function qosText(q) {
+  if (!q) return "";
+  const parts = [];
+  if (q.depth !== null && q.depth !== undefined) parts.push("depth " + q.depth);
+  if (q.reliability) parts.push(q.reliability);
+  if (q.durability && q.durability !== "volatile") parts.push(q.durability);
+  return parts.length ? " [" + parts.join(", ") + "]" : " [qos unknown]";
+}
+
+// Rich tooltips as DOM elements (vis renders Elements verbatim; strings we
+// interpolate are escaped first).
+function tooltipEl(lines) {
+  const d = document.createElement("div");
+  d.style.textAlign = "left";
+  d.innerHTML = lines.join("<br>");
+  return d;
+}
+
+function nodeTooltip(id) {
+  const b = base[id];
+  const lines = [`<b>${esc(b.name)}</b>`, esc(b.title)];
+  const pubs = staticEdges.filter(e => e.kind === "pub" && e.source === id);
+  const subs = staticEdges.filter(e => e.kind === "sub" && e.target === id);
+  if (pubs.length) {
+    lines.push("<b>publishes:</b>");
+    for (const e of pubs) {
+      lines.push(`&nbsp;&nbsp;${esc(base[e.target].name)} (${esc(e.msg_type)})${esc(qosText(e.qos))}`);
+    }
+  }
+  if (subs.length) {
+    lines.push("<b>subscribes:</b>");
+    for (const e of subs) {
+      lines.push(`&nbsp;&nbsp;${esc(base[e.source].name)} (${esc(e.msg_type)})${esc(qosText(e.qos))}`);
+    }
+  }
+  return tooltipEl(lines);
+}
+
+function topicTooltip(id) {
+  const b = base[id];
+  const lines = [`<b>${esc(b.name)}</b>`, esc(b.title)];
+  const pubs = staticEdges.filter(e => e.kind === "pub" && e.target === id);
+  const subs = staticEdges.filter(e => e.kind === "sub" && e.source === id);
+  if (pubs.length) {
+    lines.push("<b>publishers:</b>");
+    for (const e of pubs) {
+      lines.push(`&nbsp;&nbsp;${esc(base[e.source].name)}${esc(qosText(e.qos))}`);
+    }
+  }
+  if (subs.length) {
+    lines.push("<b>subscribers:</b>");
+    for (const e of subs) {
+      lines.push(`&nbsp;&nbsp;${esc(base[e.target].name)}${esc(qosText(e.qos))}`);
+    }
+  }
+  return tooltipEl(lines);
+}
+
+// ------------------------------------------------------------- filters
+// Package chips and the tests chip toggle visibility in the MAIN graph
+// only — the focus panel always shows the true neighborhood. A topic hides
+// only when EVERY node touching it is hidden (exclusive topics).
+function isHiddenMain(id) {
+  const b = base[id];
+  if (!b) return false;  // unresolved ids are never filtered
+  if (b.kind === "node") {
+    // Active-only view: every declared node stays in the picture EXCEPT
+    // the ones that are neither running nor live-only (i.e. genuinely
+    // idle right now) — a live-unavailable graph shows everything, since
+    // "active" can't be determined without a live sample.
+    if (showActiveOnly && liveAvail && !isActiveNode(id)) return true;
+    return hiddenPkgs.has(b.pkg) || (hideTests && b.isTest);
+  }
+  // Transport-variant topics hide outright — noise regardless of whether
+  // the node that made them is itself hidden (applies to static AND
+  // live-only topics alike, since isTransportVariant only looks at name).
+  if (hideTransport && isTransportVariant(b.name)) return true;
+  const touchers = topicTouchers[id];
+  if (!touchers || !touchers.size) return hideTests && b.isTest;
+  return [...touchers].every(nid => isHiddenMain(nid)) || (hideTests && b.isTest);
+}
+
+function syncHideUrl() {
+  const parts = [...hiddenPkgs];
+  if (hideTests) parts.push("tests");
+  if (showActiveOnly) parts.push("activeonly");
+  const url = new URL(location.href);
+  if (parts.length) url.searchParams.set("hide", parts.join(","));
+  else url.searchParams.delete("hide");
+  history.replaceState(null, "", url);
+}
+
+function renderFilterChips() {
+  for (const el of document.querySelectorAll("#pkg-chips .toggle")) {
+    el.classList.toggle("off", hiddenPkgs.has(el.dataset.pkg));
+  }
+  document.getElementById("tests-toggle").classList.toggle("off", hideTests);
+  const tChip = document.getElementById("transport-toggle");
+  tChip.classList.toggle("off", hideTransport);
+  tChip.textContent = `hide transport variants (${countTransportTopics()})`;
+  const aChip = document.getElementById("active-toggle");
+  aChip.classList.toggle("off", showActiveOnly);
+  const idleCount = liveAvail
+    ? Object.keys(base).filter(id => base[id].kind === "node" && !isActiveNode(id)).length
+    : null;
+  aChip.textContent = idleCount === null
+    ? "hide idle nodes"
+    : `hide idle nodes (${idleCount})`;
+}
+
+// ------------------------------------------------------------- restyle
+// styleFor(): base look + live overlay for one static element — shared by
+// the main graph (which layers chain dim/highlight on top) and the focus
+// panel (which layers center emphasis instead).
+function styleFor(id) {
+  // Defensive fallback: a live-only ego neighbor can theoretically be
+  // referenced a poll cycle before applyLive() has synthesized its base
+  // entry (see applyLive) — render it plainly rather than throwing.
+  const b = base[id] || { bg: "#eceff1", border: "#607d8b", baseBw: 1, kind: "node", liveOnly: true };
+  let bg = b.bg, border = b.border, bw = b.baseBw || 1, fcolor = "#212121";
+  if (b.liveOnly) {
+    // Live-only elements exist in the picture ONLY because they are
+    // currently running — never subject to the declared-but-idle dimming
+    // below (which only makes sense for elements the static scan knows).
+    return { bg, border, bw, fcolor };
+  }
+  if (liveAvail && b.kind === "node") {
+    if (runningIds.has(id)) { border = "#1b5e20"; bw = 3; }
+    else { bg = hexToRgba(b.bgHex, 0.35); border = "#b0bec5"; fcolor = "#78909c"; }
+  }
+  if (liveAvail && b.kind === "topic" && liveTopicIds.has(id)) {
+    border = "#1b5e20"; bw = 2;
+  }
+  return { bg, border, bw, fcolor };
+}
+
+function fontFor(id, fcolor) {
+  const b = base[id];
+  return (b && b.mono) ? { face: "monospace", size: 14, color: fcolor }
+                       : { size: 17, color: fcolor };
+}
+
+// Single styling pipeline: base look, then live overlay, then chain
+// dim/highlight. Every visual state change funnels through here.
+function restyle() {
+  const nodeUpdates = [];
+  for (const id of Object.keys(base)) {
+    const st = styleFor(id);
+    let { bg, border, bw, fcolor } = st;
+    if (chain) {
+      if (!chain.set.has(id)) {
+        bg = "rgba(207,216,220,0.18)"; border = "rgba(176,190,197,0.4)";
+        bw = 1; fcolor = "rgba(120,144,156,0.45)";
+      } else { bw = Math.max(bw, 2); fcolor = "#212121"; }
+    }
+    nodeUpdates.push({ id, color: { background: bg, border },
+                       borderWidth: bw, hidden: isHiddenMain(id),
+                       shapeProperties: { borderDashes: base[id].dashes },
+                       font: fontFor(id, fcolor) });
+  }
+  // liveOnlyIds is now a subset of Object.keys(base) (see applyLive), so
+  // the loop above already styles them via styleFor()'s liveOnly branch —
+  // no separate pass needed.
+  nodesDS.update(nodeUpdates);
+  const edgeUpdates = [];
+  // liveEdges (dashed, undeclared-in-source pub/sub links) get the same
+  // hide-filter and chain-dim treatment as static edges — they're just
+  // never eligible for the "in active chain" highlight (chain.edges only
+  // ever contains static visIds, since chains walk the declared closures).
+  for (const e of [...staticEdges, ...liveEdges]) {
+    const hidden = isHiddenMain(e.source) || isHiddenMain(e.target);
+    const live = liveEdges.includes(e);
+    if (chain && chain.edges.has(e.visId)) {
+      edgeUpdates.push({ id: e.visId, hidden, color: { color: "#1565c0" }, width: 3 });
+    } else if (chain) {
+      edgeUpdates.push({ id: e.visId, hidden,
+                         color: { color: "rgba(120,144,156,0.12)" }, width: 1 });
+    } else {
+      edgeUpdates.push({ id: e.visId, hidden,
+                         color: { color: live ? "#90a4ae" : "#78909c" }, width: 1 });
+    }
+  }
+  edgesDS.update(edgeUpdates);
+  restyleFocus();
+}
+
+// --------------------------------------------------------- focus panel
+// Click-to-open ego view: the clicked element centered, transitive inputs
+// layered left (negative signed distance), outputs right. Levels computed
+// server-side (/api/ego) so the placement rule is unit-tested.
+function restyleFocus() {
+  if (!focusId || !focusNodesDS) return;
+  const updates = [];
+  for (const id of Object.keys(focusEgo.levels)) {
+    const st = styleFor(id);
+    if (id === focusId) { st.border = "#1565c0"; st.bw = 4; st.fcolor = "#0d47a1"; }
+    updates.push({ id, color: { background: st.bg, border: st.border },
+                   borderWidth: st.bw,
+                   shapeProperties: { borderDashes: (base[id] || {}).dashes || [2, 3] },
+                   font: fontFor(id, st.fcolor) });
+  }
+  focusNodesDS.update(updates);
+}
+
+async function focusOn(id) {
+  // base[id] should already exist for anything clickable (static elements
+  // from the initial scan, live-only elements synthesized by applyLive —
+  // see there); bail only on a truly unresolvable id.
+  if (!base[id]) return;
+  const res = await fetch("/api/ego?id=" + encodeURIComponent(id));
+  if (!res.ok) return;
+  focusEgo = await res.json();
+  focusId = id;
+  const liveOnlyEgo = !!focusEgo.live_only;
+
+  const lv = focusEgo.levels;
+  const cols = {};
+  for (const eid of Object.keys(lv)) (cols[lv[eid]] = cols[lv[eid]] || []).push(eid);
+  const fpos = {};
+  for (const l of Object.keys(cols).map(Number)) {
+    // Column order mirrors the main layout's vertical order so the panel
+    // reads like a zoomed excerpt of the big picture.
+    const col = cols[l].sort((a, b) =>
+      ((mainPos[a] || {}).y || 0) - ((mainPos[b] || {}).y || 0) || a.localeCompare(b));
+    col.forEach((eid, i) => {
+      fpos[eid] = { x: l * 240, y: (i - (col.length - 1) / 2) * 85 };
+    });
+  }
+  const dual = new Set(focusEgo.dual);
+  // Defensive fallback for the (should-be-impossible post-reorder) case of
+  // a live-only neighbor not yet synthesized into base — see styleFor().
+  const metaFor = eid => base[eid] || {
+    kind: eid.startsWith("topic:") ? "topic" : "node", name: eid,
+    title: "live-only (undeclared in source)",
+  };
+  const fnodes = Object.keys(lv).map(eid => {
+    const m = metaFor(eid);
+    return {
+      id: eid,
+      label: m.name,
+      shape: m.kind === "topic" ? "box" : "ellipse",
+      x: fpos[eid].x, y: fpos[eid].y,
+      title: m.title + (dual.has(eid)
+        ? " — reachable both upstream & downstream; drawn on the closer side (tie → upstream)"
+        : ""),
+    };
+  });
+  // A live-only ego has no entries in staticEdges (it was never statically
+  // declared) — synthesize the connecting lines straight from the signed
+  // levels the server already computed instead of leaving floating nodes.
+  const fedges = liveOnlyEgo
+    ? Object.keys(lv).filter(eid => eid !== id).map(eid => {
+        const up = lv[eid] < 0;
+        return { id: "live-e-" + eid, from: up ? eid : id, to: up ? id : eid,
+                 arrows: "to", color: { color: "#78909c" }, title: "live (undeclared)" };
+      })
+    : staticEdges
+        .filter(e => e.source in lv && e.target in lv)
+        .map(e => ({ id: e.visId, from: e.source, to: e.target, arrows: "to",
+                     color: { color: "#78909c" }, title: e.msg_type }));
+
+  focusNodesDS = new vis.DataSet(fnodes);
+  const focusEdgesDS = new vis.DataSet(fedges);
+  const nUp = Object.values(lv).filter(v => v < 0).length;
+  const nDown = Object.values(lv).filter(v => v > 0).length;
+  const liveOnlySuffix = liveOnlyEgo ? " · live-only (undeclared in source)" : "";
+  document.getElementById("focustitle").textContent =
+    `focus: ${base[id].name} — ${nUp} upstream / ${nDown} downstream ` +
+    "(click an element to re-focus, Esc or ✕ to close)" + liveOnlySuffix;
+  // nUp/nUp-nDown already equal the pub/sub counts by construction (a
+  // topic's upstream neighbors ARE its publishers, downstream its
+  // subscribers; a node's downstream ARE its publishes, upstream its
+  // subscribes) — true for both the static and the live-only ego, so no
+  // separate staticEdges-based count is needed here.
+  const nPubs = base[id].kind === "topic" ? nUp : nDown;
+  const nSubs = base[id].kind === "topic" ? nDown : nUp;
+  document.getElementById("focusinfo").textContent = base[id].kind === "topic"
+    ? `${base[id].title} · ${nPubs} publisher(s), ${nSubs} subscriber(s)${liveOnlySuffix}`
+    : `${base[id].title} · ${nPubs} pub(s), ${nSubs} sub(s)${liveOnlySuffix}`;
+  document.getElementById("focuswrap").classList.add("open");
+  if (base[id].kind === "topic") startTap(id); else stopTap();
+
+  if (!focusNet) {
+    focusNet = new vis.Network(document.getElementById("focusgraph"),
+      { nodes: focusNodesDS, edges: focusEdgesDS }, {
+        layout: { improvedLayout: false },
+        physics: false,
+        edges: { smooth: { enabled: true, type: "cubicBezier", roundness: 0.4 } },
+        interaction: { hover: true, tooltipDelay: 120 },
+      });
+    // Walking the impact chain: clicking inside the panel re-focuses.
+    focusNet.on("click", ev => { if (ev.nodes.length) focusOn(ev.nodes[0]); });
+  } else {
+    focusNet.setData({ nodes: focusNodesDS, edges: focusEdgesDS });
+  }
+  restyleFocus();
+  requestAnimationFrame(() => {
+    network.redraw(); network.fit();
+    network.moveTo({ scale: network.getScale() * 0.96 });
+    focusNet.redraw(); focusNet.fit();
+    focusNet.moveTo({ scale: Math.min(focusNet.getScale() * 0.94, 1.3) });
+  });
+}
+
+// ----------------------------------------------------------- topic tap
+// On-demand live tap while a TOPIC focus panel is open. Polling at ~2 Hz
+// IS the tap lifecycle: the server creates the subscription on the first
+// poll and drops it ~5 s after the last, so closing the panel (or the
+// whole tab) releases it with no explicit teardown.
+let tapTimer = null;
+
+// ---------------------------------------------------- pointcloud 3D view
+// Vanilla canvas + a hand-rolled orbit-camera perspective projection — no
+// vendored 3D library, since the payload is just points (no lighting or
+// materials needed). Interaction is decoupled from the ~2 Hz data poll:
+// drag/wheel update the camera and redraw immediately (coalesced to one
+// draw per animation frame), so orbiting feels smooth even though new
+// point data only arrives twice a second.
+let cloudState = null;   // {xyz, rgb, n, autoMode} — autoMode recomputed every frame of data
+let cloudCam = null;     // orbit camera, reset per tap session on first pointcloud render
+let cloudDrag = null;    // {mode: "orbit"|"pan", lastX, lastY} while a pointer is down
+let cloudNeedsDraw = false;
+let cloudColorMode = "auto"; // "auto" | "rgb" | "depth" — manual pick wins for the session
+
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+// Turbo-style perceptual gradient (hand-rolled control-point interpolation,
+// not Google's exact polynomial — close enough for a "which end is which"
+// read, no vendored colormap library needed). Used for depth-mode coloring
+// when a scene is too dark for its own RGB texture to read (e.g. the real
+// L515 pointing into an unlit room: mean luminance ~1/255 — a pure-black
+// silhouette with true colors on).
+const _TURBO_STOPS = [
+  [0.00, 48, 18, 59], [0.13, 70, 107, 227], [0.25, 43, 176, 222],
+  [0.38, 50, 206, 143], [0.50, 151, 216, 58], [0.63, 224, 192, 48],
+  [0.75, 252, 138, 32], [0.88, 225, 66, 15], [1.00, 122, 4, 3],
+];
+function turboCss(t) {
+  t = Math.max(0, Math.min(1, t));
+  for (let i = 1; i < _TURBO_STOPS.length; i++) {
+    const [t0, r0, g0, b0] = _TURBO_STOPS[i - 1];
+    const [t1, r1, g1, b1] = _TURBO_STOPS[i];
+    if (t <= t1) {
+      const f = (t - t0) / (t1 - t0 || 1);
+      return `rgb(${Math.round(r0 + (r1 - r0) * f)},${Math.round(g0 + (g1 - g0) * f)},` +
+             `${Math.round(b0 + (b1 - b0) * f)})`;
+    }
+  }
+  return "rgb(122,4,3)";
+}
+
+// Mean-luminance auto-pick: a genuinely dark scene (real L515 in an unlit
+// room measured ~1/255 mean) renders as a barely-visible black silhouette
+// in RGB — default to depth coloring there; a normally-lit scene defaults
+// to its own texture. Sampled, not exhaustive: cheap even at 30k points,
+// and a per-pixel luminance mean doesn't need every point to be accurate.
+function computeAutoColorMode(rgb, n) {
+  if (!rgb || n === 0) return "depth";
+  const stride = Math.max(1, Math.floor(n / 4000));
+  let sum = 0, count = 0;
+  for (let i = 0; i < n; i += stride) {
+    sum += 0.299 * rgb[i * 3] + 0.587 * rgb[i * 3 + 1] + 0.114 * rgb[i * 3 + 2];
+    count++;
+  }
+  return (sum / count) < 15 ? "depth" : "rgb";
+}
+
+function effectiveCloudColorMode() {
+  if (!cloudState || !cloudState.rgb) return "depth";
+  return cloudColorMode === "auto" ? (cloudState.autoMode || "rgb") : cloudColorMode;
+}
+
+function initCloudCamera(bbox, canvas) {
+  const min = bbox.min, max = bbox.max;
+  const ex = max[0] - min[0], ey = max[1] - min[1], ez = max[2] - min[2];
+  const radius = Math.max(Math.sqrt(ex * ex + ey * ey + ez * ez) / 2, 0.05);
+  return {
+    cx: (min[0] + max[0]) / 2, cy: (min[1] + max[1]) / 2, cz: (min[2] + max[2]) / 2,
+    yaw: 0.6, pitch: 0.35,
+    dist: radius * 2.6, minDist: radius * 0.1, maxDist: radius * 25,
+    panX: 0, panY: 0,
+    focal: Math.min(canvas.width, canvas.height) * 0.9,
+  };
+}
+
+function projectCloudPoint(x, y, z, cam, canvasW, canvasH) {
+  const dx = x - cam.cx, dy = y - cam.cy, dz = z - cam.cz;
+  const cosY = Math.cos(cam.yaw), sinY = Math.sin(cam.yaw);
+  const x1 = dx * cosY - dz * sinY, z1 = dx * sinY + dz * cosY;
+  const cosP = Math.cos(cam.pitch), sinP = Math.sin(cam.pitch);
+  const y1 = dy * cosP - z1 * sinP, z2 = dy * sinP + z1 * cosP;
+  const zc = z2 + cam.dist;
+  if (zc < 0.02) return null; // behind the camera
+  const f = cam.focal / zc;
+  return [x1 * f + canvasW / 2 + cam.panX, -y1 * f + canvasH / 2 + cam.panY, zc];
+}
+
+function drawCloud() {
+  const canvas = document.getElementById("tapcloud");
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#10151a";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (!cloudState || !cloudCam) return;
+  const { xyz, rgb, n } = cloudState;
+  const cam = cloudCam;
+  const sx = new Float32Array(n), sy = new Float32Array(n), sz = new Float32Array(n);
+  const visible = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const p = projectCloudPoint(xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2], cam, canvas.width, canvas.height);
+    if (p) { sx[i] = p[0]; sy[i] = p[1]; sz[i] = p[2]; visible[i] = 1; }
+  }
+  // Painter's algorithm: draw far-to-near for basic occlusion (adequate for
+  // a point cloud preview; a real depth buffer isn't worth it here).
+  const order = Array.from({ length: n }, (_, i) => i).filter(i => visible[i]);
+  order.sort((a, b) => sz[b] - sz[a]);
+
+  const mode = effectiveCloudColorMode();
+  let depthLo = 0, depthHi = 1;
+  if (mode === "depth" && order.length) {
+    // View-space depth (zc, already computed by the projection above) is
+    // the cheapest per-point distance metric available in this loop — no
+    // extra pass over xyz needed. Plain min/max over the visible set (not
+    // a percentile): the cloud is already server-side downsampled and
+    // NaN/invalid-filtered, so outliers are rare enough not to wash out
+    // the range in practice.
+    depthLo = sz[order[order.length - 1]];
+    depthHi = sz[order[0]];
+    if (depthHi <= depthLo) depthHi = depthLo + 1e-6;
+  }
+  for (const i of order) {
+    if (sx[i] < -4 || sx[i] > canvas.width + 4 || sy[i] < -4 || sy[i] > canvas.height + 4) continue;
+    const size = Math.max(1, Math.min(4, cam.focal / sz[i] * 0.02));
+    if (mode === "depth") {
+      ctx.fillStyle = turboCss((sz[i] - depthLo) / (depthHi - depthLo));
+    } else {
+      ctx.fillStyle = rgb ? `rgb(${rgb[i * 3]},${rgb[i * 3 + 1]},${rgb[i * 3 + 2]})` : "#9ec9ff";
+    }
+    ctx.fillRect(sx[i] - size / 2, sy[i] - size / 2, size, size);
+  }
+}
+
+function scheduleCloudDraw() {
+  if (cloudNeedsDraw) return;
+  cloudNeedsDraw = true;
+  requestAnimationFrame(() => { cloudNeedsDraw = false; drawCloud(); });
+}
+
+(function setupCloudInteraction() {
+  const canvas = document.getElementById("tapcloud");
+  canvas.addEventListener("contextmenu", e => e.preventDefault());
+  canvas.addEventListener("pointerdown", e => {
+    if (!cloudCam) return;
+    canvas.setPointerCapture(e.pointerId);
+    canvas.classList.add("dragging");
+    cloudDrag = { mode: (e.button === 2 || e.shiftKey) ? "pan" : "orbit", lastX: e.clientX, lastY: e.clientY };
+  });
+  canvas.addEventListener("pointermove", e => {
+    if (!cloudDrag || !cloudCam) return;
+    const dx = e.clientX - cloudDrag.lastX, dy = e.clientY - cloudDrag.lastY;
+    cloudDrag.lastX = e.clientX; cloudDrag.lastY = e.clientY;
+    if (cloudDrag.mode === "pan") {
+      cloudCam.panX += dx; cloudCam.panY += dy;
+    } else {
+      cloudCam.yaw += dx * 0.006;
+      cloudCam.pitch = Math.max(-1.5, Math.min(1.5, cloudCam.pitch + dy * 0.006));
+    }
+    scheduleCloudDraw();
+  });
+  const endDrag = () => { cloudDrag = null; canvas.classList.remove("dragging"); };
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+  canvas.addEventListener("wheel", e => {
+    if (!cloudCam) return;
+    e.preventDefault();
+    const factor = Math.exp(e.deltaY * 0.001);
+    cloudCam.dist = Math.max(cloudCam.minDist, Math.min(cloudCam.maxDist, cloudCam.dist * factor));
+    scheduleCloudDraw();
+  }, { passive: false });
+
+  // Color-mode toggle: a manual pick overrides auto-detection for the rest
+  // of this tap session (reset to "auto" on the next startTap/stopTap).
+  for (const chip of document.querySelectorAll("#tapcolormode .modechip")) {
+    chip.addEventListener("click", () => {
+      cloudColorMode = chip.dataset.mode;
+      updateColorModeChips();
+      scheduleCloudDraw();
+    });
+  }
+})();
+
+function updateColorModeChips() {
+  const mode = effectiveCloudColorMode();
+  for (const chip of document.querySelectorAll("#tapcolormode .modechip")) {
+    chip.classList.toggle("active", chip.dataset.mode === mode);
+  }
+  const auto = document.getElementById("tapcolorauto");
+  auto.textContent = cloudColorMode === "auto" ? "(auto)" : "";
+}
+
+function stopTap() {
+  if (tapTimer) clearInterval(tapTimer);
+  tapTimer = null;
+  document.getElementById("tapstrip").style.display = "none";
+  document.getElementById("tapcloud").style.display = "none";
+  document.getElementById("tapcloudcaption").style.display = "none";
+  document.getElementById("tapcloudhelp").style.display = "none";
+  document.getElementById("tapcolormode").style.display = "none";
+  cloudState = null; cloudCam = null; cloudDrag = null; cloudColorMode = "auto";
+}
+
+function startTap(id) {
+  stopTap();
+  document.getElementById("tapstrip").style.display = "block";
+  document.getElementById("tapstatus").textContent = "▸ tapping " + base[id].name + " …";
+  document.getElementById("tapimg").style.display = "none";
+  document.getElementById("tapfields").style.display = "none";
+  document.getElementById("tapdepth").style.display = "none";
+  cloudColorMode = "auto"; // fresh auto-detection each tap session
+  const poll = () => pollTap(id);
+  tapTimer = setInterval(poll, 500);
+  poll();
+}
+
+async function pollTap(id) {
+  const st = document.getElementById("tapstatus");
+  const img = document.getElementById("tapimg");
+  const pre = document.getElementById("tapfields");
+  const depth = document.getElementById("tapdepth");
+  const cloud = document.getElementById("tapcloud");
+  const cloudCap = document.getElementById("tapcloudcaption");
+  const cloudHelp = document.getElementById("tapcloudhelp");
+  const cloudMode = document.getElementById("tapcolormode");
+  const hideAllRenders = () => {
+    img.style.display = "none"; pre.style.display = "none"; depth.style.display = "none";
+    cloud.style.display = "none"; cloudCap.style.display = "none"; cloudHelp.style.display = "none";
+    cloudMode.style.display = "none";
+  };
+  try {
+    const res = await fetch("/api/tap?id=" + encodeURIComponent(id));
+    if (!res.ok) { st.textContent = "▸ tap error: HTTP " + res.status; return; }
+    const t = await res.json();
+    if (t.status !== "ok") {
+      st.textContent = "▸ " + (
+        t.status === "no_live_publisher" ? "no live publisher on this topic" :
+        t.status === "type_unavailable" ? "topic not live — message type unknown until a publisher exists" :
+        t.status === "live_unavailable" ? "live tap unavailable — " + (t.reason || "") :
+        t.status === "tap_limit" ? (t.detail || "tap limit reached") :
+        t.status);
+      hideAllRenders();
+      return;
+    }
+    const mbs = t.bandwidth_bps >= 1e6 ? (t.bandwidth_bps / 1e6).toFixed(1) + " MB/s"
+                                       : (t.bandwidth_bps / 1e3).toFixed(1) + " kB/s";
+    const age = t.last_msg_age_s === null ? "no msg yet" : "last msg " + t.last_msg_age_s.toFixed(1) + " s ago";
+    st.textContent =
+      `▸ topic (actual): ${t.hz.toFixed(1)} Hz · ${mbs} · ${t.msgs_total} msgs · ${age} · ${t.msg_type}`;
+    if (t.render && t.render.kind === "image") {
+      hideAllRenders();
+      img.src = "data:image/jpeg;base64," + t.render.jpeg_b64;
+      img.title = t.render.source_size;
+      img.style.display = "block";
+      const dm = t.render.depth_meta;
+      if (dm && dm.depth_min_m !== null && dm.depth_min_m !== undefined) {
+        depth.textContent = `depth: ${dm.depth_min_m.toFixed(3)} – ${dm.depth_max_m.toFixed(3)} m (1st–99th pct, zeros = invalid/black)`;
+        depth.style.display = "block";
+      }
+    } else if (t.render && t.render.kind === "pointcloud") {
+      hideAllRenders();
+      const r = t.render;
+      // Absent/oversized payload guard: fall back to whatever the server
+      // sent instead (it only ever sends "pointcloud" with a payload, or
+      // "fields"/"note" on failure — this branch is the happy path).
+      if (r.point_count > 0 && r.xyz_b64) {
+        const xyz = new Float32Array(b64ToBytes(r.xyz_b64).buffer);
+        const rgb = r.has_color && r.rgb_b64 ? b64ToBytes(r.rgb_b64) : null;
+        // Recomputed every frame (cheap, sampled) so a scene that changes
+        // lighting mid-session keeps auto-picking sensibly; a manual
+        // override (cloudColorMode !== "auto") is unaffected either way.
+        const autoMode = computeAutoColorMode(rgb, r.point_count);
+        cloudState = { xyz, rgb, n: r.point_count, autoMode };
+        if (!cloudCam) cloudCam = initCloudCamera(r.bbox, cloud);
+        cloud.style.display = "block";
+        const bb = r.bbox;
+        cloudCap.textContent =
+          `points: ${r.point_count.toLocaleString()}` +
+          (r.total_valid > r.point_count ? ` (downsampled from ${r.total_valid.toLocaleString()} valid)` : "") +
+          ` · bbox x[${bb.min[0].toFixed(2)},${bb.max[0].toFixed(2)}]` +
+          ` y[${bb.min[1].toFixed(2)},${bb.max[1].toFixed(2)}]` +
+          ` z[${bb.min[2].toFixed(2)},${bb.max[2].toFixed(2)}] m` +
+          (r.frame_id ? ` · frame "${r.frame_id}"` : "") +
+          (r.has_color ? "" : " · uncolored");
+        cloudCap.style.display = "block"; cloudHelp.style.display = "block";
+        // The rgb/depth choice only makes sense when there IS an rgb
+        // texture to choose between — an uncolored cloud is depth-only,
+        // nothing to toggle.
+        cloudMode.style.display = rgb ? "block" : "none";
+        updateColorModeChips();
+        scheduleCloudDraw();
+      } else {
+        pre.textContent = "no valid points in latest message";
+        pre.style.display = "block";
+      }
+    } else if (t.render && t.render.kind === "fields") {
+      hideAllRenders();
+      pre.textContent = JSON.stringify(t.render.tree, null, 1);
+      pre.style.display = "block";
+    } else if (t.render && t.render.note) {
+      hideAllRenders();
+      pre.textContent = t.render.note;
+      pre.style.display = "block";
+    }
+  } catch (err) {
+    st.textContent = "▸ tap poll failed: " + err;
+  }
+}
+
+function closeFocus() {
+  if (!focusId) return;
+  stopTap();
+  focusId = null; focusEgo = null; focusNodesDS = null;
+  document.getElementById("focuswrap").classList.remove("open");
+  requestAnimationFrame(() => {
+    network.redraw(); network.fit();
+    network.moveTo({ scale: network.getScale() * 0.96 });
+  });
+}
+
+// -------------------------------------------------------- chain logic
+// Chain of an element = itself + transitive ancestors + descendants over
+// the REAL directed graph (closures computed server-side, cycle-safe).
+// An edge is on the chain iff it feeds the ancestry (target in up+self)
+// or continues the descent (source in down+self).
+function highlightChain(id) {
+  const c = closures[id] || { up: [], down: [] };
+  const up = new Set(c.up), down = new Set(c.down);
+  const set = new Set([id, ...c.up, ...c.down]);
+  const edges = new Set();
+  for (const e of staticEdges) {
+    if (up.has(e.target) || e.target === id || down.has(e.source) || e.source === id) {
+      if (set.has(e.source) && set.has(e.target)) edges.add(e.visId);
+    }
+  }
+  chain = { set, edges };
+  restyle();
+}
+
+function clearChain() { chain = null; restyle(); }
+
+// ---------------------------------------------------------- live poll
+function applyLive(live) {
+  liveAvail = !!live.available;
+  const chip = document.getElementById("livechip");
+  if (!liveAvail) {
+    chip.textContent = "live: unavailable — " + (live.reason || "?");
+    chip.className = "";
+    runningIds = new Set(); liveTopicIds = new Set();
+    for (const id of liveOnlyIds) { nodesDS.remove(id); delete base[id]; }
+    liveOnlyIds = new Set();
+    for (const le of liveEdges) edgesDS.remove(le.visId);
+    liveEdges = [];
+    liveOnlySetSig = "";
+    updateSummaryLine();
+    renderFilterChips();
+    restyle();
+    return;
+  }
+  // Name-matching rule: a static node is "running" when its declared node
+  // name equals the live node's BASE name (namespace ignored — this repo
+  // declares no namespaces; a namespaced deployment would still match).
+  const liveBase = new Set(live.nodes.map(n => n.name));
+  runningIds = new Set(Object.keys(base).filter(
+    id => base[id].kind === "node" && liveBase.has(base[id].name)));
+  const staticNames = new Set(Object.values(base)
+    .filter(b => b.kind === "node" && !b.liveOnly).map(b => b.name));
+  // Bug fix (advisor-reported flapping 0↔N live count): the ANALOGOUS set
+  // for topics — "genuinely static" means present in base AND not itself
+  // a previously-synthesized liveOnly entry. The topic wanted-check below
+  // must exclude only THIS set, not "any topic currently in base" — using
+  // base[tid] directly there flip-flopped every poll, since base[tid]
+  // becomes truthy the instant a live-only topic is first synthesized,
+  // which then made the very next poll's `wanted` exclude it, which made
+  // the remove-loop delete it, which made base[tid] falsy again next
+  // poll — add/remove/add/remove forever (and, since the live-only SET
+  // signature changed every poll too, a full re-layout every poll as
+  // well). The node loop above never had this bug because staticNames
+  // already excludes liveOnly nodes the same way.
+  const staticTopicIds = new Set(Object.keys(base)
+    .filter(id => base[id].kind === "topic" && !base[id].liveOnly));
+  liveTopicIds = new Set();
+  for (const t of live.topics) {
+    const tid = "topic:" + t.name;
+    if (base[tid] && (t.pub_count > 0 || t.sub_count > 0)) liveTopicIds.add(tid);
+  }
+  // Live-only elements (rviz, ros2cli daemon, a topic a composed C++
+  // driver creates at runtime, …): synthesized into `base` itself (marked
+  // liveOnly: true) so every existing base-driven code path (styling,
+  // tooltips, hover-chain, filters, and critically the focus panel / tap)
+  // just works on them unchanged — and laid out through the SAME
+  // longest-path/barycenter pass as the static graph (computeLayout),
+  // using the live pub/sub edge list, so e.g. a dynamically-created topic
+  // lands in a real column next to the node that publishes it instead of
+  // an unpositioned pile. Re-layout only runs when the live-only ID SET
+  // actually changes (gated by liveOnlySetSig) — a periodic Hz/count
+  // sample must never make the graph jump around.
+  const wanted = new Map();
+  for (const n of live.nodes) {
+    if (!staticNames.has(n.name)) {
+      wanted.set("live:" + n.full, {
+        kind: "node", name: n.full, shape: "ellipse", mono: false,
+        bg: "#eceff1", bgHex: "#eceff1", border: "#607d8b", baseBw: 1,
+        pkg: null, isTest: false, dashes: [2, 3], liveOnly: true,
+        title: "running, but not declared anywhere in the scanned source",
+      });
+    }
+  }
+  for (const t of live.topics) {
+    const tid = "topic:" + t.name;
+    if (!staticTopicIds.has(tid) && (t.pub_count > 0 || t.sub_count > 0)) {
+      wanted.set(tid, {
+        kind: "topic", name: t.name, shape: "box", mono: true,
+        bg: "#eceff1", bgHex: "#eceff1", border: "#607d8b", baseBw: 1,
+        pkg: null, isTest: false, dashes: [2, 3], liveOnly: true,
+        title: (t.types && t.types[0]) ||
+               "(unknown msg type) — live topic, not declared anywhere in the scanned source",
+      });
+    }
+  }
+
+  const wantedKeys = [...wanted.keys()].sort();
+  const setChanged = wantedKeys.join("\n") !== liveOnlySetSig;
+  let newPos = null;
+  let liveLayoutEdges = [];
+  if (setChanged) {
+    // A live edge's node endpoint is either an already-identified STATIC
+    // node (running-matched — use its real id, already positioned) or a
+    // synthesized "live:"+full id; the topic endpoint is always
+    // "topic:"+name (same id scheme for static and live-only topics).
+    const liveFullToName = new Map(live.nodes.map(n => [n.full, n.name]));
+    const liveNodeElementId = full => {
+      const name = liveFullToName.get(full);
+      if (name) {
+        const staticMatch = Object.keys(base).find(
+          id => base[id].kind === "node" && !base[id].liveOnly && base[id].name === name);
+        if (staticMatch) return staticMatch;
+      }
+      return "live:" + full;
+    };
+    liveLayoutEdges = (live.edges || []).map(e => {
+      const nodeId = liveNodeElementId(e.node);
+      const topicId = "topic:" + e.topic;
+      return e.kind === "pub" ? { source: nodeId, target: topicId }
+                              : { source: topicId, target: nodeId };
+    });
+    newPos = computeLayout(
+      [...staticElementIds, ...wantedKeys],
+      [...staticLayoutEdges, ...liveLayoutEdges]
+    );
+  }
+
+  for (const id of [...liveOnlyIds]) {
+    if (!wanted.has(id)) { nodesDS.remove(id); liveOnlyIds.delete(id); delete base[id]; }
+  }
+  for (const [id, meta] of wanted) {
+    if (!liveOnlyIds.has(id)) {
+      base[id] = meta;
+      const p = newPos && newPos[id];
+      nodesDS.add({
+        id, label: meta.name, shape: meta.shape,
+        x: p ? p.x : 0, y: p ? p.y : 0,
+        color: { background: meta.bg, border: meta.border },
+        shapeProperties: { borderDashes: meta.dashes },
+        font: meta.mono ? { face: "monospace", size: 14, color: "#455a64" }
+                        : { size: 15, color: "#455a64" },
+        title: meta.title,
+      });
+      liveOnlyIds.add(id);
+    }
+  }
+  if (setChanged) {
+    liveOnlySetSig = wantedKeys.join("\n");
+    mainPos = newPos;
+    nodesDS.update(Object.keys(newPos).map(id => ({ id, x: newPos[id].x, y: newPos[id].y })));
+
+    // Draw the live pub/sub edges on the main graph too (dashed grey —
+    // never in the static edge list): a live-only element's position
+    // shouldn't just be "coincidentally near" its neighbor, it should be
+    // visibly connected, so discovering it never requires a click.
+    for (const le of liveEdges) edgesDS.remove(le.visId);
+    liveEdges = [];
+    const seen = new Set();
+    for (const e of liveLayoutEdges) {
+      if (!(e.source in base) || !(e.target in base)) continue;
+      const visId = "live-e-" + e.source + "->" + e.target;
+      if (seen.has(visId)) continue;
+      seen.add(visId);
+      liveEdges.push({ source: e.source, target: e.target, visId });
+      edgesDS.add({ id: visId, from: e.source, to: e.target, arrows: "to",
+                    color: { color: "#90a4ae" }, dashes: [3, 3],
+                    title: "live pub/sub (undeclared in source)" });
+    }
+  }
+  chip.textContent = "live: " + live.nodes.length + " running";
+  chip.className = "on";
+  updateSummaryLine();
+  renderFilterChips();
+  restyle();
+}
+
+async function pollLive() {
+  try {
+    const res = await fetch("/api/live");
+    applyLive(await res.json());
+  } catch (err) {
+    applyLive({ available: false, reason: "poll failed" });
+  }
+}
+
+// ------------------------------------------------------------- layout
+// Left-to-right level per graph element: longest path over the acyclic
+// part of the graph, then a barycenter ordering pass within each column
+// (sorts by the mean y of predecessors already placed, to reduce edge
+// crossings). vis-network's own hierarchical solver produced unreadable
+// coordinate spreads on this topology, so it is bypassed entirely —
+// positions are ours, vis only draws. Shared by the initial static-only
+// layout (load()) and the live-only re-layout (applyLive()) so live
+// elements land in proper columns next to their real neighbors instead of
+// an unpositioned pile — the graph DOES contain cycles (test harnesses
+// both subscribe downstream and publish upstream, e.g. bench_color, and a
+// live-only element can cycle back through a live edge too), so back
+// edges are found by DFS first and excluded from layering — they simply
+// draw right-to-left, as rqt_graph does. Edges whose endpoints aren't both
+// in `elementIds` are ignored (lets callers pass the full static+live edge
+// set without pre-filtering).
+function computeLayout(elementIds, edges) {
+  const level = {};
+  for (const id of elementIds) level[id] = 0;
+
+  const adj = {};
+  for (const e of edges) {
+    if (!(e.source in level) || !(e.target in level)) continue;
+    (adj[e.source] = adj[e.source] || []).push(e.target);
+  }
+  const back = new Set();
+  const state = {};  // undefined = unvisited, 1 = on stack, 2 = done
+  for (const root of elementIds) {
+    if (state[root]) continue;
+    state[root] = 1;
+    const stack = [[root, 0]];
+    while (stack.length) {
+      const frame = stack[stack.length - 1];
+      const nbrs = adj[frame[0]] || [];
+      if (frame[1] < nbrs.length) {
+        const v = nbrs[frame[1]++];
+        if (state[v] === 1) back.add(frame[0] + " " + v);
+        else if (!state[v]) { state[v] = 1; stack.push([v, 0]); }
+      } else {
+        state[frame[0]] = 2;
+        stack.pop();
+      }
+    }
+  }
+
+  const cap = elementIds.length;
+  for (let pass = 0; pass < cap; pass++) {  // converges; cap is a safety net
+    let changed = false;
+    for (const e of edges) {
+      if (!(e.source in level) || !(e.target in level)) continue;
+      if (back.has(e.source + " " + e.target)) continue;
+      if (level[e.target] < level[e.source] + 1) {
+        level[e.target] = level[e.source] + 1;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  const X_SEP = 215, Y_SEP = 85;
+  const preds = {};
+  for (const e of edges) {
+    if (!(e.source in level) || !(e.target in level)) continue;
+    (preds[e.target] = preds[e.target] || []).push(e.source);
+  }
+  const columns = {};
+  for (const id of elementIds) (columns[level[id]] = columns[level[id]] || []).push(id);
+  const pos = {};
+  for (const lvl of Object.keys(columns).map(Number).sort((a, b) => a - b)) {
+    const col = columns[lvl];
+    col.sort((a, b) => {
+      const bary = id => {
+        const ps = (preds[id] || []).filter(p => p in pos);
+        return ps.length ? ps.reduce((sum, p) => sum + pos[p].y, 0) / ps.length : 0;
+      };
+      return bary(a) - bary(b) || a.localeCompare(b);
+    });
+    col.forEach((id, i) => {
+      pos[id] = { x: lvl * X_SEP, y: (i - (col.length - 1) / 2) * Y_SEP };
+    });
+  }
+  return pos;
+}
+
+// -------------------------------------------------------------- load
+async function load() {
+  const res = await fetch("/api/graph");
+  const g = await res.json();
+  closures = g.closures || {};
+
+  const packages = [...new Set(g.nodes.map(n => n.package))].sort();
+  const colorOf = {};
+  packages.forEach((p, i) => { colorOf[p] = PALETTE[i % PALETTE.length]; });
+
+  staticSummary = g.summary;
+  updateSummaryLine();
+  document.getElementById("pkg-chips").innerHTML = packages.map(p =>
+    `<span class="chip toggle" data-pkg="${esc(p)}" style="margin-left:10px" ` +
+    `title="hide/show ${esc(p)}"><span class="swatch" ` +
+    `style="background:${colorOf[p]}"></span>${esc(p)}</span>`).join("");
+  for (const el of document.querySelectorAll("#pkg-chips .toggle")) {
+    el.addEventListener("click", () => {
+      const p = el.dataset.pkg;
+      if (hiddenPkgs.has(p)) hiddenPkgs.delete(p); else hiddenPkgs.add(p);
+      syncHideUrl(); renderFilterChips(); restyle();
+    });
+  }
+  document.getElementById("tests-toggle").addEventListener("click", () => {
+    hideTests = !hideTests;
+    syncHideUrl(); renderFilterChips(); restyle();
+  });
+  document.getElementById("transport-toggle").addEventListener("click", () => {
+    hideTransport = !hideTransport;
+    renderFilterChips(); restyle();
+  });
+  document.getElementById("active-toggle").addEventListener("click", () => {
+    showActiveOnly = !showActiveOnly;
+    syncHideUrl(); renderFilterChips(); restyle();
+  });
+
+  staticElementIds = [...g.nodes.map(n => n.id), ...g.topics.map(t => "topic:" + t.name)];
+  staticLayoutEdges = g.edges;
+  const pos = computeLayout(staticElementIds, staticLayoutEdges);
+  mainPos = pos;
+
+  staticEdges = g.edges.map((e, i) => ({ ...e, visId: "e" + i }));
+  topicTouchers = {};
+  for (const e of g.edges) {
+    const [tid, nid] = e.kind === "pub" ? [e.target, e.source] : [e.source, e.target];
+    (topicTouchers[tid] = topicTouchers[tid] || new Set()).add(nid);
+  }
+
+  const visNodes = [];
+  for (const n of g.nodes) {
+    const isCpp = n.language === "cpp";
+    base[n.id] = { kind: "node", name: n.node_name, bgHex: colorOf[n.package],
+                   bg: colorOf[n.package], pkg: n.package,
+                   border: isCpp ? "#1a237e" : "#455a64",
+                   baseBw: isCpp ? 2.5 : 1,
+                   isTest: !!n.is_test,
+                   dashes: n.is_test ? [6, 4] : false, mono: false,
+                   title: `${n.package} — ${n.source_file}` +
+                          (n.class_name ? ` (class ${n.class_name})` : " (module-level)") +
+                          (isCpp ? " · C++ (heuristic scan)" : "") };
+    visNodes.push({
+      id: n.id,
+      x: pos[n.id].x, y: pos[n.id].y,
+      label: n.node_name,
+      shape: "ellipse",
+      color: { background: colorOf[n.package], border: "#455a64" },
+      shapeProperties: { borderDashes: n.is_test ? [6, 4] : false },
+      font: { size: 17 },
+      title: `${n.package} — ${n.source_file}` +
+             (n.class_name ? ` (class ${n.class_name})` : " (module-level)"),
+    });
+  }
+  for (const t of g.topics) {
+    const tid = "topic:" + t.name;
+    base[tid] = { kind: "topic", name: t.name, bgHex: "#ffffff", bg: "#ffffff",
+                  border: t.dynamic ? "#e53935" : "#455a64", pkg: null,
+                  isTest: [...(topicTouchers[tid] || [])].length > 0 &&
+                          [...(topicTouchers[tid] || [])].every(
+                            nid => g.nodes.find(n => n.id === nid)?.is_test),
+                  dashes: t.dynamic ? [6, 4] : false, mono: true,
+                  title: t.msg_type || "(unknown msg type)" };
+    visNodes.push({
+      id: tid,
+      x: pos[tid].x, y: pos[tid].y,
+      label: t.name,
+      shape: "box",
+      color: { background: "#ffffff", border: t.dynamic ? "#e53935" : "#455a64" },
+      shapeProperties: { borderDashes: t.dynamic ? [6, 4] : false },
+      font: { face: "monospace", size: 14 },
+      title: t.msg_type || "(unknown msg type)",
+    });
+  }
+  const visEdges = staticEdges.map(e => ({
+    id: e.visId,
+    from: e.source, to: e.target,
+    arrows: "to",
+    color: { color: "#78909c" },
+    title: e.msg_type + qosText(e.qos),
+  }));
+
+  // Rich tooltips need the complete base/staticEdges maps, so they are
+  // attached after both element loops.
+  for (const vn of visNodes) {
+    vn.title = base[vn.id].kind === "topic" ? topicTooltip(vn.id) : nodeTooltip(vn.id);
+  }
+
+  // Package/test filters from the URL (?hide=pkg1,pkg2,tests). Applied on
+  // top of the transport-variant filter's own default (hidden), so that
+  // default takes effect on a plain load with no URL params too.
+  const hideParam = new URLSearchParams(location.search).get("hide");
+  if (hideParam) {
+    for (const part of hideParam.split(",")) {
+      if (part === "tests") hideTests = true;
+      else if (part === "activeonly") showActiveOnly = true;
+      else if (packages.includes(part)) hiddenPkgs.add(part);
+    }
+  }
+  renderFilterChips();
+  for (const vn of visNodes) vn.hidden = isHiddenMain(vn.id);
+  for (const ve of visEdges) ve.hidden = isHiddenMain(ve.from) || isHiddenMain(ve.to);
+
+  nodesDS = new vis.DataSet(visNodes);
+  edgesDS = new vis.DataSet(visEdges);
+  const container = document.getElementById("graph");
+  network = new vis.Network(container, { nodes: nodesDS, edges: edgesDS }, {
+    layout: { improvedLayout: false },
+    physics: false,
+    edges: { smooth: { enabled: true, type: "cubicBezier", roundness: 0.4 } },
+    interaction: { hover: true, tooltipDelay: 120 },
+  });
+  // Fit after the first real draw so label-inflated bounding boxes are
+  // known — a synchronous fit() clipped the outermost labels. Then back
+  // off a few percent so edge arrows and ellipse strokes clear the canvas.
+  network.once("afterDrawing", () => {
+    network.fit();
+    network.moveTo({ scale: network.getScale() * 0.96 });
+  });
+
+  network.on("hoverNode", ev => highlightChain(ev.node));
+  network.on("blurNode", clearChain);
+  network.on("click", ev => { if (ev.nodes.length) focusOn(ev.nodes[0]); });
+  document.getElementById("focusclose").addEventListener("click", closeFocus);
+  document.addEventListener("keydown", ev => { if (ev.key === "Escape") closeFocus(); });
+
+  // One live poll BEFORE resolving deep links: a live-only element (e.g. a
+  // topic a composed C++ driver creates at runtime) only exists in `base`
+  // once applyLive() has synthesized it, so /?focus=<live-only-topic> on a
+  // cold page load needs that poll to have already landed.
+  await pollLive();
+  setInterval(pollLive, 2500);
+
+  // Deep links (and the headless-verification path): /?highlight=<name>
+  // runs the exact hover code path, /?focus=<name> the exact click path.
+  // They compose; with both present, each just applies to its own layer.
+  const resolve = want => want && (
+    Object.keys(base).find(id => base[id].name === want) ||
+    Object.keys(base).find(id => base[id].kind === "topic" && base[id].name === "/" + want) ||
+    (base[want] ? want : null));
+  const params = new URLSearchParams(location.search);
+  const hl = resolve(params.get("highlight"));
+  if (hl) highlightChain(hl);
+  const fc = resolve(params.get("focus"));
+  if (fc) focusOn(fc);
+}
+load().catch(err => {
+  document.getElementById("summary").textContent = "failed to load graph: " + err;
+});
+</script>
+</body>
+</html>

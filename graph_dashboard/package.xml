@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format2.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="2">
+  <name>graph_dashboard</name>
+  <version>0.7.0</version>
+  <description>
+    Static ROS-graph dashboard: an AST-based scanner that extracts every
+    node, topic, and pub/sub edge declared anywhere in the workspace source
+    (running or not), and a local web view that renders the whole-project
+    architecture rqt_graph-style. Read-only introspection tooling; it never
+    imports or executes the scanned packages.
+  </description>
+  <maintainer email="i.jiraphan@gmail.com">JB</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <!-- The scanner and server core are pure stdlib (ast + http.server).
+       rospy/rosgraph are used ONLY by the server's live-overlay probe and
+       topic taps, imported lazily inside their own threads: without ROS
+       sourced (or with no roscore running) everything still runs and
+       /api/live reports itself unavailable. -->
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>rosgraph</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>rosunit</test_depend>
+
+  <export>
+    <build_type>catkin</build_type>
+  </export>
+</package>

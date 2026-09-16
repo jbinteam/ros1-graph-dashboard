@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+build/
+devel/
+install/
+log/
+.pytest_cache/
+graph.json
