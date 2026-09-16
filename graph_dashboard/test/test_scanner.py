@@ -80,6 +80,88 @@ def test_resolution_tiers_and_dynamic(tmp_path):
         "depth": 5, "reliability": None, "durability": "volatile"}
 
 
+_INIT_NODE_IN_MAIN = """
+import rospy
+from std_msgs.msg import String
+
+
+class Talker:
+    def __init__(self):
+        self.pub = rospy.Publisher("/chatter", String, queue_size=10)
+
+
+def main():
+    rospy.init_node("talker_node")
+    Talker()
+"""
+
+
+def test_node_name_falls_back_to_file_level_init_node(tmp_path):
+    # rospy's dominant idiom: pub/sub in a class, init_node in main(). The
+    # node must carry the init_node literal, not the class name — the live
+    # overlay matches static names against live master names, so a
+    # class-name label could never be marked running.
+    src = tmp_path / "catkin_ws" / "src"
+    pkg = src / "p" / "src"
+    pkg.mkdir(parents=True)
+    (pkg / "talker.py").write_text(textwrap.dedent(_INIT_NODE_IN_MAIN), encoding="utf-8")
+    graph = scan_workspace(src)
+
+    names = {n["node_name"] for n in graph["nodes"]}
+    assert names == {"talker_node"}
+    node = graph["nodes"][0]
+    assert node["class_name"] == "Talker"  # class still reported for the tooltip
+    assert (node["id"], "topic:/chatter", "pub") in {
+        (e["source"], e["target"], e["kind"]) for e in graph["edges"]
+    }
+
+
+def test_class_own_init_node_beats_file_level(tmp_path):
+    src = tmp_path / "catkin_ws" / "src"
+    pkg = src / "p" / "src"
+    pkg.mkdir(parents=True)
+    (pkg / "two.py").write_text(textwrap.dedent("""
+        import rospy
+        from std_msgs.msg import String
+
+
+        class Inner:
+            def __init__(self):
+                rospy.init_node("inner_node")
+                self.pub = rospy.Publisher("/inner", String, queue_size=1)
+
+
+        def main():
+            rospy.init_node("outer_node")
+    """), encoding="utf-8")
+    graph = scan_workspace(src)
+    assert {n["node_name"] for n in graph["nodes"]} == {"inner_node"}
+
+
+def test_queue_size_only_read_from_keywords(tmp_path):
+    # rospy.Publisher's 3rd positional slot is subscriber_listener and
+    # Subscriber's is callback — never the queue size. Reading positionally
+    # there would report another argument's value as the depth.
+    src = tmp_path / "catkin_ws" / "src"
+    pkg = src / "p" / "src"
+    pkg.mkdir(parents=True)
+    (pkg / "q.py").write_text(textwrap.dedent("""
+        import rospy
+        from std_msgs.msg import String
+
+        rospy.init_node("q_node")
+        pub = rospy.Publisher("/positional", String, 10)
+        pub2 = rospy.Publisher("/keyword", String, queue_size=7, latch=True)
+    """), encoding="utf-8")
+    graph = scan_workspace(src)
+    qos = {}
+    for e in graph["edges"]:
+        qos[(e["target"])[len("topic:"):]] = e["qos"]
+    assert qos["/positional"]["depth"] is None
+    assert qos["/keyword"] == {
+        "depth": 7, "reliability": None, "durability": "transient_local"}
+
+
 def _edges(*pairs):
     return [{"source": s, "target": t} for s, t in pairs]
 
@@ -214,6 +296,43 @@ def test_cpp_scanner_fixture(tmp_path):
     assert qos_by_topic["/camera/image_raw"] == {
         "depth": 5, "reliability": None, "durability": "volatile"}
     assert qos_by_topic["?topic_param_"]["depth"] == 1
+
+
+_FAKE_CPP_PTR = """
+#include <ros/ros.h>
+#include <std_msgs/String.h>
+
+class PtrTalker {
+  ros::NodeHandle* nh_;
+  void setup() {
+    pub_ = nh_->advertise<std_msgs::String>("/ptr_topic", 10);
+    sub_ = nh_->subscribe<std_msgs::String>("/ptr_in", 5, &PtrTalker::cb, this);
+  }
+};
+
+int main(int argc, char** argv) {
+  ros::init(argc, argv, "ptr_node");
+}
+"""
+
+
+def test_cpp_pointer_node_handle(tmp_path):
+    # A NodeHandle held as a pointer (`nh_->advertise<T>`) is as common in
+    # roscpp as the value spelling — both must be found.
+    src = tmp_path / "catkin_ws" / "src"
+    pkg = src / "cpp_pkg" / "src"
+    pkg.mkdir(parents=True)
+    (pkg / "ptr_talker.cpp").write_text(_FAKE_CPP_PTR, encoding="utf-8")
+    graph = scan_workspace(src)
+
+    assert {n["node_name"] for n in graph["nodes"]} == {"ptr_node"}
+    topics = {t["name"]: t for t in graph["topics"]}
+    assert topics["/ptr_topic"]["msg_type"] == "std_msgs/String"
+    assert topics["/ptr_in"]["msg_type"] == "std_msgs/String"
+    kinds = {(e["kind"], (e["target"] if e["kind"] == "pub" else e["source"]))
+             for e in graph["edges"]}
+    assert ("pub", "topic:/ptr_topic") in kinds
+    assert ("sub", "topic:/ptr_in") in kinds
 
 
 def test_python_only_fixture_unaffected_by_cpp_pass(tmp_path):

@@ -22,9 +22,11 @@
        /api/live reports itself unavailable. -->
   <exec_depend>rospy</exec_depend>
   <exec_depend>rosgraph</exec_depend>
+  <!-- roslib.message.get_message_class resolves a tapped topic's type name
+       to its Python class at tap time. -->
+  <exec_depend>roslib</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
-  <test_depend>rosunit</test_depend>
 
   <export>
     <build_type>catkin</build_type>

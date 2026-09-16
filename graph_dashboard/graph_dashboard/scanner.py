@@ -120,18 +120,20 @@ def _get_param_default(node):
     return _const_str(node.args[1])
 
 
-def _ros1_queue_info(call, is_pub):
+def _ros1_queue_info(call):
     """Best-effort static queue_size/latch of one Publisher/Subscriber call.
 
-    `queue_size` and `latch` are read from keywords only for Subscriber
-    (whose 3rd positional slot is the callback, not the queue size — too
-    ambiguous to guess positionally) and from either keyword or the 3rd
-    positional argument for Publisher (`rospy.Publisher(topic, Type, N)`
-    is common). Unknown stays None/False — never a guess. Reuses the same
-    {"depth", "reliability", "durability"} shape the ROS 2 scanner used
-    for QoS so the web UI's qosText() needs no changes: "reliability" is
-    always None (no ROS 1 concept), "durability" carries "transient_local"
-    when latched, else "volatile".
+    Keyword arguments ONLY, deliberately: in rospy's real signatures the
+    positional slots that follow (topic, msg_type) are
+    `subscriber_listener` for Publisher and `callback` for Subscriber, not
+    the queue size — reading a positional there would report another
+    argument's value as the depth. `queue_size` and `latch` are keyword
+    arguments in essentially all rospy code for exactly that reason.
+    Unknown stays None/False — never a guess. Reuses the same {"depth",
+    "reliability", "durability"} shape the ROS 2 scanner used for QoS so
+    the web UI's qosText() needs no changes: "reliability" is always None
+    (no ROS 1 concept), "durability" carries "transient_local" when
+    latched, else "volatile".
     """
     depth = None
     latch = False
@@ -142,10 +144,6 @@ def _ros1_queue_info(call, is_pub):
         elif kw.arg == "latch" and isinstance(kw.value, ast.Constant) \
                 and isinstance(kw.value.value, bool):
             latch = kw.value.value
-    if depth is None and is_pub and len(call.args) >= 3:
-        third = call.args[2]
-        if isinstance(third, ast.Constant) and isinstance(third.value, int):
-            depth = third.value
     return {
         "depth": depth,
         "reliability": None,
@@ -233,6 +231,21 @@ def _node_name_for_scope(body_nodes, fallback):
     return fallback
 
 
+def _file_node_name(tree):
+    """The `rospy.init_node("name")` literal anywhere in the file, else None.
+
+    ROS 1's dominant idiom splits what ROS 2 keeps together: the pub/sub
+    calls live in a class, but `init_node` is called in `main()` outside
+    it. Falling back to the class name there would label the node with
+    something the running graph never uses — and the live overlay matches
+    static names against live master names, so such a node could never be
+    marked running. One process is one ROS 1 node, so a file-level
+    `init_node` literal is the right name for every pub/sub in that file
+    that has no closer one.
+    """
+    return _node_name_for_scope(list(ast.walk(tree)), None)
+
+
 class GraphBuilder:
     """Accumulates nodes / topics / edges across all scanned files."""
 
@@ -252,7 +265,7 @@ class GraphBuilder:
             return
         topic_expr = call.args[0]
         msg_type = _msg_type_name(call.args[1], msg_imports)
-        qos = _ros1_queue_info(call, is_pub=(kind == "pub"))
+        qos = _ros1_queue_info(call)
         topic = scope.resolve(topic_expr)
         if topic is None:
             try:
@@ -318,7 +331,7 @@ class GraphBuilder:
 # the Python scanner uses.
 
 _CPP_CALL_RE = re.compile(
-    r"\b\w+\s*\.\s*(advertise|subscribe)\s*<\s*([A-Za-z0-9_:\s]+?)\s*>\s*\("
+    r"\b\w+\s*(?:\.|->)\s*(advertise|subscribe)\s*<\s*([A-Za-z0-9_:\s]+?)\s*>\s*\("
 )
 _CPP_INIT_NAME_RE = re.compile(r'\bros::init\s*\(\s*\w+\s*,\s*\w+\s*,\s*"([^"]+)"')
 _CPP_CLASS_RE = re.compile(r"class\s+(\w+)\b")
@@ -456,6 +469,11 @@ def _scan_file(path, src_root, builder):
                 if val is not None:
                     module_consts[target.id] = val
 
+    # Name resolution order for a class: its own init_node literal, then
+    # the file's (rospy's dominant idiom calls init_node in main(), not in
+    # the class), then the class name.
+    file_node_name = _file_node_name(tree)
+
     classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
     for cls in classes:
         body = list(_walk_skip_nested_classes(cls))
@@ -470,7 +488,7 @@ def _scan_file(path, src_root, builder):
             continue
         scope = _Scope(module_consts)
         scope.collect_assigns(body)
-        node_name = _node_name_for_scope(body, cls.name)
+        node_name = _node_name_for_scope(body, file_node_name or cls.name)
         node_id = "node:{}/{}".format(package, node_name)
         builder.ensure_node(node_id, node_name, package, rel_file, cls.name, is_test)
         for call in calls:

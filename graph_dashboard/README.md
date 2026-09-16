@@ -96,13 +96,24 @@ compose: `/?focus=camera_driver&hide=sim,tests`.
   summary. The static view shows declared defaults; runtime roslaunch
   remaps or parameter-server overrides are not applied.
 - **Node naming:** the literal in the nearest `rospy.init_node("name")`
-  call in the same class (or module body, for module-level calls), else
-  the class name, else the file stem for module-level pub/sub calls — this
-  matches idiomatic rospy, which has no `Node`-subclass convention.
+  call in the same class, else the file's `init_node` literal wherever it
+  sits (rospy's dominant idiom puts pub/sub in a class but calls
+  `init_node` in `main()`, and one process is one ROS 1 node), else the
+  class name, else the file stem — this matches idiomatic rospy, which has
+  no `Node`-subclass convention. Getting this right matters beyond labels:
+  the live overlay matches these names against live master names, so a
+  class-name guess would leave a running node permanently marked idle.
+- **Queue info** comes from the `queue_size=` / `latch=` **keywords**
+  only. rospy's positional slots after the topic and type are
+  `subscriber_listener` (Publisher) and `callback` (Subscriber), never the
+  queue size, so a positional read there would report another argument's
+  value as the depth.
 - **C++ (roscpp) coverage is heuristic**, not a real C++ parse: it finds
   `nh.advertise<T>("topic", queue_size, latch)` / `nh.subscribe<T>(...)`
-  call sites in `*.cpp/*.cc/*.hpp/*.hh` (the templated spelling only —
-  callback-signature type inference is out of scope), takes the topic from
+  call sites in `*.cpp/*.cc/*.hpp/*.hh` through either a value or a
+  pointer NodeHandle (`nh.advertise<T>` and `nh_->advertise<T>` alike;
+  the templated spelling only — callback-signature type inference is out
+  of scope), takes the topic from
   the string literal (a variable becomes the same `?<expr>` placeholder),
   the message type from the template argument, the node name from a
   `ros::init(argc, argv, "name")` literal (else the first class found in
@@ -170,7 +181,10 @@ network, no root). Dropped into ANY directory and run with
 `bash install.sh`, it creates or reuses `./src`, checks the environment
 (sourcing `/opt/ros/noetic/setup.bash` if nothing is sourced, with
 actionable errors otherwise), initializes the catkin workspace if needed,
-extracts, builds with `catkin_make`, and runs the package self-test on an
+extracts, builds **only this package** (`catkin_make --only-pkg-with-deps
+graph_dashboard`, so dropping it into a populated workspace can't be
+derailed by an unrelated package, with the whitelist cleared from the
+CMake cache afterwards), and runs the package self-test on an
 ephemeral port. Re-running refuses to overwrite an existing
 `src/graph_dashboard` unless given `--force`, which keeps a timestamped
 backup at the workspace root. In a workspace without a pinned reference
@@ -186,10 +200,15 @@ of the vendored file.
 
 ## Tests
 
-`python3 -m pytest test/` (or `catkin_make run_tests --pkg graph_dashboard`
-inside a built workspace) runs unit tests for the scanner's resolution
-tiers, reachability closures (cycle-safe), and ego depth clamping, plus the
-live-only-element HTTP tests. `rosrun graph_dashboard bench_test` is the
+`python3 -m pytest test/` runs unit tests for the scanner's resolution
+tiers, node-naming fallbacks, C++ value/pointer NodeHandle spellings,
+reachability closures (cycle-safe), and ego depth clamping, plus the
+live-only-element HTTP tests. Inside a built workspace,
+`catkin_make run_tests --pkg graph_dashboard` runs the same suite —
+`CMakeLists.txt` registers pytest through `catkin_run_tests_target` rather
+than `catkin_add_nosetests`, because these tests use pytest fixtures
+(`tmp_path`, `monkeypatch`) that nose cannot supply.
+`rosrun graph_dashboard bench_test` is the
 end-to-end check: a fresh scan, every endpoint of a real server boot on an
 ephemeral port, the 404 path, the vendored asset, and clean shutdown.
 

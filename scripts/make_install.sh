@@ -116,8 +116,21 @@ PAYLOAD_EOF
 say "extracted $(find src/graph_dashboard -type f | wc -l) files"
 
 # ------------------------------------------------------------------- build
-say "building (catkin_make) ..."
-catkin_make
+# Build ONLY this package: a bare catkin_make builds every package in the
+# workspace, so dropping the installer into an existing workspace would
+# rebuild (and could fail on) unrelated packages. --only-pkg-with-deps is
+# catkin's equivalent of colcon's --packages-select; it writes
+# CATKIN_WHITELIST_PACKAGES into the CMake cache, which is cleared right
+# after so a later plain catkin_make here still builds everything.
+say "building (catkin_make --only-pkg-with-deps graph_dashboard) ..."
+catkin_make --only-pkg-with-deps graph_dashboard
+WHITELIST_CLEARED=1
+cmake -DCATKIN_WHITELIST_PACKAGES="" build >/dev/null 2>&1 || WHITELIST_CLEARED=0
+if [ "$WHITELIST_CLEARED" -eq 0 ]; then
+  say "note: could not clear CATKIN_WHITELIST_PACKAGES automatically — if a later"
+  say "      plain 'catkin_make' here builds only graph_dashboard, run:"
+  say "      catkin_make -DCATKIN_WHITELIST_PACKAGES=''"
+fi
 
 # ------------------------------------------------------------- self-verify
 set +u
