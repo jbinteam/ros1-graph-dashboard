@@ -91,10 +91,21 @@ compose: `/?focus=camera_driver&hide=sim,tests`.
 
 - **Topic-name resolution** (static, in order): string literal at the call
   site → simple local/self/module-constant assignment →
-  `rospy.get_param("key", default)`'s **default** literal. Unresolvable
-  names appear as `?<expr>` placeholders and are counted in the coverage
-  summary. The static view shows declared defaults; runtime roslaunch
-  remaps or parameter-server overrides are not applied.
+  `rospy.get_param("key", default)`'s **default** literal. The resolved
+  name is then put through the **launch instance** that runs the file:
+  relative names are resolved against its namespace (`<group ns>` and node
+  `ns`), `~private` names under the node, and `<remap from= to=>` is
+  applied, with `$(arg name)` expanded from `<arg>` defaults. So a script
+  that says `rospy.Subscriber("image_raw", …)` shows up as
+  `/qr_cam_left/image_raw` under the launch entry that remaps it there.
+  Unresolvable names appear as `?<expr>` placeholders and are counted in
+  the coverage summary. Parameter-server overrides applied at runtime are
+  still not modelled, and `<include>`d launch files are not followed.
+- **One graph node per launch instance.** An executable launched several
+  times (three camera pipelines from one script, say) becomes three nodes,
+  each wired to its own remapped topics — the shape the live graph has.
+  Without any launch entry, the source-derived name and raw topic names
+  stand unchanged.
 - **Node naming**, in order: the name a **launch file** gives the
   executable (`<node pkg=… type=… name=…>`), then the literal in the
   nearest `rospy.init_node("name")` call in the same class, then the
@@ -106,10 +117,9 @@ compose: `/?focus=camera_driver&hide=sim,tests`.
   name is what the running master actually reports. Getting this order
   right matters beyond labels: the live overlay matches declared names
   against live master names, so a source-literal-only graph would leave
-  every launch-started node permanently marked idle. When several launch
-  entries run one executable, the source literal stays as the label and
-  every launch name (namespaces included, `<group ns>` respected) is kept
-  in the node's `launch_names` so the overlay still matches any of them.
+  every launch-started node permanently marked idle. Each node carries its
+  fully-qualified launch name in `launch_names`, which the overlay matches
+  as well as the declared name.
 - **Queue info** comes from the `queue_size=` / `latch=` **keywords**
   only. rospy's positional slots after the topic and type are
   `subscriber_listener` (Publisher) and `callback` (Subscriber), never the

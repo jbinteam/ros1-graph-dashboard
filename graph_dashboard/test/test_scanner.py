@@ -190,9 +190,9 @@ def test_launch_name_overrides_source_init_node(tmp_path):
 
 
 def test_launch_group_namespace_and_multiple_instances(tmp_path):
-    # Two launch entries for one executable: the code name stays as the
-    # label (no single right answer), but both launch names travel along
-    # for matching, namespace included.
+    # Two launch entries for one executable are two running nodes, so they
+    # are two graph nodes — each on its own namespaced topic, not merged
+    # onto one shared "/chatter".
     src = _launch_ws(tmp_path, """
         <launch>
           <group ns="left">
@@ -202,9 +202,95 @@ def test_launch_group_namespace_and_multiple_instances(tmp_path):
         </launch>
     """)
     graph = scan_workspace(src)
-    node = graph["nodes"][0]
-    assert node["node_name"] == "talker_node"  # source literal kept
-    assert sorted(node["launch_names"]) == ["/left/talker_a", "/right/talker_b"]
+    names = {n["node_name"]: n for n in graph["nodes"]}
+    assert set(names) == {"talker_a", "talker_b"}
+    assert names["talker_a"]["launch_names"] == ["/left/talker_a"]
+    assert names["talker_b"]["launch_names"] == ["/right/talker_b"]
+    # "/chatter" is global in the source, so the namespace does NOT apply.
+    assert {t["name"] for t in graph["topics"]} == {"/chatter"}
+
+
+_RELATIVE_TOPIC_NODE = """
+import rospy
+from std_msgs.msg import String
+
+
+class Cam:
+    def __init__(self):
+        self.pub = rospy.Publisher("camera_info", String, queue_size=1)
+        self.sub = rospy.Subscriber("image_raw", String, self.cb, queue_size=1)
+
+
+def main():
+    rospy.init_node("camera_info_publisher")
+    Cam()
+"""
+
+
+def _relative_ws(tmp_path, launch_xml):
+    src = tmp_path / "catkin_ws" / "src"
+    scripts = src / "demo_pkg" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "cam.py").write_text(textwrap.dedent(_RELATIVE_TOPIC_NODE), encoding="utf-8")
+    launch = src / "demo_pkg" / "launch"
+    launch.mkdir(parents=True)
+    (launch / "cams.launch").write_text(textwrap.dedent(launch_xml), encoding="utf-8")
+    return src
+
+
+def test_launch_remap_with_arg_substitution(tmp_path):
+    # The real-world pattern: one script launched per camera, each <remap>
+    # pointing its relative topics at that camera's real topics, with the
+    # target coming from an <arg> default. Each instance must report the
+    # topics IT actually uses.
+    src = _relative_ws(tmp_path, """
+        <launch>
+          <arg name="left_image" default="/qr_cam_left/image_raw"/>
+          <node pkg="demo_pkg" type="cam.py" name="left_info">
+            <remap from="image_raw" to="$(arg left_image)"/>
+            <remap from="camera_info" to="/qr_cam_left/camera_info"/>
+          </node>
+          <node pkg="demo_pkg" type="cam.py" name="right_info">
+            <remap from="image_raw" to="/qr_cam_right/image_raw"/>
+            <remap from="camera_info" to="/qr_cam_right/camera_info"/>
+          </node>
+        </launch>
+    """)
+    graph = scan_workspace(src)
+    assert {n["node_name"] for n in graph["nodes"]} == {"left_info", "right_info"}
+    assert {t["name"] for t in graph["topics"]} == {
+        "/qr_cam_left/image_raw", "/qr_cam_left/camera_info",
+        "/qr_cam_right/image_raw", "/qr_cam_right/camera_info",
+    }
+    edges = {(e["source"], e["target"]) for e in graph["edges"]}
+    assert ("node:demo_pkg/left_info", "topic:/qr_cam_left/camera_info") in edges
+    assert ("topic:/qr_cam_right/image_raw", "node:demo_pkg/right_info") in edges
+
+
+def test_relative_topic_resolves_against_launch_namespace(tmp_path):
+    # No remap: a relative topic still becomes namespaced at runtime, so
+    # the declared graph must say /arm/camera_info, not bare camera_info.
+    src = _relative_ws(tmp_path, """
+        <launch>
+          <group ns="arm">
+            <node pkg="demo_pkg" type="cam.py" name="info_pub"/>
+          </group>
+        </launch>
+    """)
+    graph = scan_workspace(src)
+    assert {t["name"] for t in graph["topics"]} == {"/arm/camera_info", "/arm/image_raw"}
+
+
+def test_no_launch_file_leaves_topics_untouched(tmp_path):
+    # Without a launch file there is no namespace or remap to apply; the
+    # source's own names stand, exactly as before.
+    src = tmp_path / "catkin_ws" / "src"
+    scripts = src / "demo_pkg" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "cam.py").write_text(textwrap.dedent(_RELATIVE_TOPIC_NODE), encoding="utf-8")
+    graph = scan_workspace(src)
+    assert {n["node_name"] for n in graph["nodes"]} == {"camera_info_publisher"}
+    assert {t["name"] for t in graph["topics"]} == {"camera_info", "image_raw"}
 
 
 def test_malformed_launch_file_does_not_crash(tmp_path):
