@@ -6,3 +6,5 @@ install/
 log/
 .pytest_cache/
 graph.json
+.vscode/
+
