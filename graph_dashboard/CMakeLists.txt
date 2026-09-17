@@ -12,7 +12,7 @@ catkin_install_python(
     scripts/scan
     scripts/serve
     scripts/bench_test
-  DESTINATION ${CATKIN_PACKAGE_BIN_DIR}
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
 if(CATKIN_ENABLE_TESTING)

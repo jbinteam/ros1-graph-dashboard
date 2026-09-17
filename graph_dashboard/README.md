@@ -95,14 +95,21 @@ compose: `/?focus=camera_driver&hide=sim,tests`.
   names appear as `?<expr>` placeholders and are counted in the coverage
   summary. The static view shows declared defaults; runtime roslaunch
   remaps or parameter-server overrides are not applied.
-- **Node naming:** the literal in the nearest `rospy.init_node("name")`
-  call in the same class, else the file's `init_node` literal wherever it
-  sits (rospy's dominant idiom puts pub/sub in a class but calls
-  `init_node` in `main()`, and one process is one ROS 1 node), else the
-  class name, else the file stem — this matches idiomatic rospy, which has
-  no `Node`-subclass convention. Getting this right matters beyond labels:
-  the live overlay matches these names against live master names, so a
-  class-name guess would leave a running node permanently marked idle.
+- **Node naming**, in order: the name a **launch file** gives the
+  executable (`<node pkg=… type=… name=…>`), then the literal in the
+  nearest `rospy.init_node("name")` call in the same class, then the
+  file's `init_node` literal wherever it sits (rospy's dominant idiom puts
+  pub/sub in a class but calls `init_node` in `main()`, and one process is
+  one ROS 1 node), then the class name, then the file stem.
+  The launch file wins because roslaunch passes `__name:=`, which
+  **overrides** whatever the source passed to `init_node()` — so the launch
+  name is what the running master actually reports. Getting this order
+  right matters beyond labels: the live overlay matches declared names
+  against live master names, so a source-literal-only graph would leave
+  every launch-started node permanently marked idle. When several launch
+  entries run one executable, the source literal stays as the label and
+  every launch name (namespaces included, `<group ns>` respected) is kept
+  in the node's `launch_names` so the overlay still matches any of them.
 - **Queue info** comes from the `queue_size=` / `latch=` **keywords**
   only. rospy's positional slots after the topic and type are
   `subscriber_listener` (Publisher) and `callback` (Subscriber), never the
@@ -143,8 +150,9 @@ A background thread in `serve` polls the ROS 1 master's system state
 (`rosgraph.Master.getSystemState()` / `getTopicTypes()`) every ~2 s —
 pure XML-RPC queries against `ROS_MASTER_URI`, so unlike the ROS 2 version
 **no live node is ever created**; nothing shows up in `rosnode list` as a
-side effect. A static node is marked **running** when its declared node
-name (fully-qualified, e.g. `/camera_driver`) matches a live node's name.
+side effect. A static node is marked **running** when a live node's base
+name matches either its declared name or any of its launch-file names
+(see node naming above — roslaunch's `name=` is what the master reports).
 Running nodes render saturated with a bold green border; declared-but-idle
 nodes dim; live nodes that appear in no source file (`rviz`, an anonymous
 `rostopic echo`, …) render as dotted ellipses beneath the graph so the
@@ -164,6 +172,9 @@ unavailable" chip, and everything static keeps working.
   resolution, queue/latch extraction). **C++ packages get heuristic
   coverage** — see the design rules above for exactly what is and isn't
   resolved.
+- **Python 3.6+ (Noetic ships 3.8).** `ast.unparse` is 3.9+, so the
+  scanner carries its own fallback renderer; unresolved topic expressions
+  stay readable (`?self.topic_name`) on a stock Noetic install.
 - **The live overlay and topic taps are language-agnostic**: they observe
   the ROS master graph itself, so C++, Python, and nodelet-hosted nodes all
   appear when running regardless of what the static scan could see.

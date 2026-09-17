@@ -162,6 +162,82 @@ def test_queue_size_only_read_from_keywords(tmp_path):
         "depth": 7, "reliability": None, "durability": "transient_local"}
 
 
+def _launch_ws(tmp_path, launch_xml):
+    src = tmp_path / "catkin_ws" / "src"
+    scripts = src / "demo_pkg" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "talker.py").write_text(textwrap.dedent(_INIT_NODE_IN_MAIN), encoding="utf-8")
+    launch = src / "demo_pkg" / "launch"
+    launch.mkdir(parents=True)
+    (launch / "demo.launch").write_text(textwrap.dedent(launch_xml), encoding="utf-8")
+    return src
+
+
+def test_launch_name_overrides_source_init_node(tmp_path):
+    # roslaunch passes __name:=, which beats the source's init_node literal.
+    # The declared graph must use the name the master will actually show,
+    # or the live overlay can never mark the node running.
+    src = _launch_ws(tmp_path, """
+        <launch>
+          <node pkg="demo_pkg" type="talker.py" name="renamed_talker"/>
+        </launch>
+    """)
+    graph = scan_workspace(src)
+    node = graph["nodes"][0]
+    assert node["node_name"] == "renamed_talker"
+    assert node["launch_names"] == ["/renamed_talker"]
+    assert graph["summary"]["launch_nodes_found"] == 1
+
+
+def test_launch_group_namespace_and_multiple_instances(tmp_path):
+    # Two launch entries for one executable: the code name stays as the
+    # label (no single right answer), but both launch names travel along
+    # for matching, namespace included.
+    src = _launch_ws(tmp_path, """
+        <launch>
+          <group ns="left">
+            <node pkg="demo_pkg" type="talker.py" name="talker_a"/>
+          </group>
+          <node pkg="demo_pkg" type="talker.py" name="talker_b" ns="right"/>
+        </launch>
+    """)
+    graph = scan_workspace(src)
+    node = graph["nodes"][0]
+    assert node["node_name"] == "talker_node"  # source literal kept
+    assert sorted(node["launch_names"]) == ["/left/talker_a", "/right/talker_b"]
+
+
+def test_malformed_launch_file_does_not_crash(tmp_path):
+    src = _launch_ws(tmp_path, "<launch><node pkg='p' type='t.py' ")
+    graph = scan_workspace(src)
+    assert graph["nodes"][0]["node_name"] == "talker_node"
+    assert graph["summary"]["launch_nodes_found"] == 0
+
+
+def test_dynamic_topic_placeholder_readable_without_ast_unparse(tmp_path, monkeypatch):
+    # ROS 1 Noetic ships Python 3.8, where ast.unparse does not exist. The
+    # fallback must still produce a readable "?self.topic_name" rather than
+    # a useless "?<expr>" blob.
+    from graph_dashboard import scanner as sc
+
+    monkeypatch.delattr(sc.ast, "unparse", raising=False)
+    src = tmp_path / "catkin_ws" / "src"
+    pkg = src / "p" / "src"
+    pkg.mkdir(parents=True)
+    (pkg / "dyn.py").write_text(textwrap.dedent("""
+        import rospy
+        from std_msgs.msg import String
+
+        class N:
+            def __init__(self):
+                rospy.init_node("n")
+                self.sub = rospy.Subscriber(self.topic_name, String, self.cb)
+    """), encoding="utf-8")
+    graph = scan_workspace(src)
+    names = [t["name"] for t in graph["topics"]]
+    assert names == ["?self.topic_name"]
+
+
 def _edges(*pairs):
     return [{"source": s, "target": t} for s, t in pairs]
 

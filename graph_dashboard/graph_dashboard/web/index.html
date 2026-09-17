@@ -898,14 +898,26 @@ function applyLive(live) {
     restyle();
     return;
   }
-  // Name-matching rule: a static node is "running" when its declared node
-  // name equals the live node's BASE name (namespace ignored — this repo
-  // declares no namespaces; a namespaced deployment would still match).
+  // Name-matching rule: a static node is "running" when the live node's
+  // BASE name (namespace ignored) equals either its declared name or any
+  // name a launch file gives it. The launch alternative matters in ROS 1:
+  // `<node name=...>` passes __name:=, overriding the source's init_node
+  // literal, so a launch-started node appears on the master under the
+  // launch name and would otherwise never be matched.
   const liveBase = new Set(live.nodes.map(n => n.name));
+  const nodeMatchesLive = b =>
+    liveBase.has(b.name) || (b.launchNames || []).some(n => liveBase.has(n));
   runningIds = new Set(Object.keys(base).filter(
-    id => base[id].kind === "node" && liveBase.has(base[id].name)));
-  const staticNames = new Set(Object.values(base)
-    .filter(b => b.kind === "node" && !b.liveOnly).map(b => b.name));
+    id => base[id].kind === "node" && nodeMatchesLive(base[id])));
+  // Names that count as "already covered by a static node" when deciding
+  // which live nodes are live-only — launch aliases included, or a
+  // launch-renamed node would be drawn twice (once static, once dotted).
+  const staticNames = new Set();
+  for (const b of Object.values(base)) {
+    if (b.kind !== "node" || b.liveOnly) continue;
+    staticNames.add(b.name);
+    for (const ln of b.launchNames || []) staticNames.add(ln);
+  }
   // Bug fix (advisor-reported flapping 0↔N live count): the ANALOGOUS set
   // for topics — "genuinely static" means present in base AND not itself
   // a previously-synthesized liveOnly entry. The topic wanted-check below
@@ -974,7 +986,9 @@ function applyLive(live) {
       const name = liveFullToName.get(full);
       if (name) {
         const staticMatch = Object.keys(base).find(
-          id => base[id].kind === "node" && !base[id].liveOnly && base[id].name === name);
+          id => base[id].kind === "node" && !base[id].liveOnly &&
+                (base[id].name === name ||
+                 (base[id].launchNames || []).includes(name)));
         if (staticMatch) return staticMatch;
       }
       return "live:" + full;
@@ -1185,6 +1199,10 @@ async function load() {
   for (const n of g.nodes) {
     const isCpp = n.language === "cpp";
     base[n.id] = { kind: "node", name: n.node_name, bgHex: colorOf[n.package],
+                   // Base names roslaunch gives this executable; roslaunch's
+                   // __name:= overrides the source's init_node literal, so a
+                   // launch-started node is live under one of these instead.
+                   launchNames: (n.launch_names || []).map(s => s.split("/").pop()),
                    bg: colorOf[n.package], pkg: n.package,
                    border: isCpp ? "#1a237e" : "#455a64",
                    baseBw: isCpp ? 2.5 : 1,

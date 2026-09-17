@@ -40,6 +40,40 @@ import sys
 _EXCLUDE_DIRS = {"build", "devel", "install", "log", "__pycache__", ".pytest_cache", ".git"}
 _PUBSUB = {"Publisher", "Subscriber"}
 _CPP_EXTS = {".cpp", ".cc", ".hpp", ".hh"}
+_LAUNCH_EXTS = {".launch", ".xml"}
+
+
+def _unparse(node):
+    """Render an AST expression as source text, Python 3.8 included.
+
+    `ast.unparse` only exists on Python 3.9+, and ROS 1 Noetic ships
+    Python 3.8 — without this fallback every unresolved topic on the
+    target platform would degrade to the useless placeholder
+    "?<unparseable>" and every non-imported message type to "?".
+    Reconstructs the expression shapes that actually appear in topic and
+    type arguments; anything else becomes "<expr>".
+    """
+    unparse = getattr(ast, "unparse", None)
+    if unparse is not None:
+        try:
+            return unparse(node)
+        except Exception:
+            return "<expr>"
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return _unparse(node.value) + "." + node.attr
+    if isinstance(node, ast.Constant):
+        return repr(node.value) if isinstance(node.value, str) else str(node.value)
+    if isinstance(node, ast.Call):
+        return _unparse(node.func) + "(...)"
+    if isinstance(node, ast.Subscript):
+        return _unparse(node.value) + "[...]"
+    if isinstance(node, ast.JoinedStr):
+        return "f-string"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _unparse(node.left) + " + " + _unparse(node.right)
+    return "<expr>"
 
 
 def _src_has_packages(src_dir: Path):
@@ -84,6 +118,70 @@ def _iter_py_files(src_root: Path):
         if any(part in _EXCLUDE_DIRS for part in path.parts):
             continue
         yield path
+
+
+def _iter_launch_files(src_root: Path):
+    for path in sorted(src_root.rglob("*.launch")):
+        if any(part in _EXCLUDE_DIRS for part in path.parts):
+            continue
+        yield path
+    for path in sorted(src_root.rglob("*.launch.xml")):
+        if any(part in _EXCLUDE_DIRS for part in path.parts):
+            continue
+        yield path
+
+
+def _collect_launch_nodes(elem, ns, out, pkg_fallback):
+    """Walk a launch tree, recording <node> names under their <group ns>."""
+    for child in elem:
+        if child.tag == "group":
+            child_ns = child.get("ns", "")
+            joined = ns
+            if child_ns:
+                joined = (ns.rstrip("/") + "/" + child_ns.strip("/")) if ns else \
+                    "/" + child_ns.strip("/")
+            _collect_launch_nodes(child, joined, out, pkg_fallback)
+            continue
+        if child.tag == "node":
+            pkg = child.get("pkg") or pkg_fallback
+            typ = child.get("type")
+            name = child.get("name")
+            if not (pkg and typ and name):
+                continue
+            node_ns = child.get("ns", "")
+            full_ns = ns
+            if node_ns:
+                full_ns = (ns.rstrip("/") + "/" + node_ns.strip("/")) if ns else \
+                    "/" + node_ns.strip("/")
+            full = (full_ns.rstrip("/") if full_ns else "") + "/" + name
+            out.setdefault((pkg, Path(typ).stem), []).append(full)
+            continue
+        # <include>, <arg>, <remap>, … may still wrap nodes in some files.
+        _collect_launch_nodes(child, ns, out, pkg_fallback)
+
+
+def _scan_launch_files(src_root: Path):
+    """Map (package, executable stem) -> launch-declared node names.
+
+    ROS 1's launch files are authoritative about node names in a way ROS 2's
+    are not: `<node pkg="p" type="t.py" name="n"/>` passes `__name:=n`,
+    which OVERRIDES whatever literal the source passed to
+    `rospy.init_node()` / `ros::init()`. A graph built only from the source
+    literal therefore disagrees with every running system started by
+    roslaunch — and since the live overlay matches declared names against
+    live master names, nothing would ever be marked running.
+    """
+    import xml.etree.ElementTree as ET
+
+    out = {}
+    for path in _iter_launch_files(src_root):
+        try:
+            tree = ET.parse(str(path))
+        except Exception:
+            continue  # a malformed launch file must never kill the scan
+        pkg_fallback = path.relative_to(src_root).parts[0]
+        _collect_launch_nodes(tree.getroot(), "", out, pkg_fallback)
+    return out
 
 
 def _iter_cpp_files(src_root: Path):
@@ -210,10 +308,7 @@ def _msg_type_name(expr, msg_imports):
     """Render the message-type argument, expanding `from x.msg import Y` imports."""
     if isinstance(expr, ast.Name) and expr.id in msg_imports:
         return msg_imports[expr.id]
-    try:
-        return ast.unparse(expr)
-    except Exception:  # unparse failure must never kill the scan
-        return "?"
+    return _unparse(expr)
 
 
 def _node_name_for_scope(body_nodes, fallback):
@@ -267,13 +362,7 @@ class GraphBuilder:
         msg_type = _msg_type_name(call.args[1], msg_imports)
         qos = _ros1_queue_info(call)
         topic = scope.resolve(topic_expr)
-        if topic is None:
-            try:
-                expr_text = ast.unparse(topic_expr)
-            except Exception:
-                expr_text = "<unparseable>"
-        else:
-            expr_text = None
+        expr_text = None if topic is not None else _unparse(topic_expr)
         self.record(kind, msg_type, topic, expr_text, qos, node_id, rel_file, call.lineno)
 
     def record(self, kind, msg_type, topic, expr_text, qos, node_id, rel_file, line):
@@ -306,7 +395,7 @@ class GraphBuilder:
             )
 
     def ensure_node(self, node_id, node_name, package, rel_file, class_name, is_test,
-                    language="python"):
+                    language="python", launch_names=()):
         self.nodes.setdefault(
             node_id,
             {
@@ -317,6 +406,11 @@ class GraphBuilder:
                 "class_name": class_name,
                 "is_test": is_test,
                 "language": language,
+                # Fully-qualified names roslaunch gives this executable
+                # (`<node name=...>` wins over the source's init_node
+                # literal). The live overlay matches against these too, so
+                # a launch-renamed node still lights up as running.
+                "launch_names": list(launch_names),
             },
         )
 
@@ -400,7 +494,20 @@ def _ros1_cpp_queue(args):
     return info
 
 
-def _scan_cpp_file(path, src_root, builder):
+def _launch_name_or(code_name, launch_names):
+    """Prefer roslaunch's name when exactly one launch entry runs this file.
+
+    roslaunch passes `__name:=`, which overrides the source literal, so the
+    launch name is what the running graph actually shows. With several
+    launch entries for one executable the code name is kept as the label
+    and every launch name still travels in `launch_names` for matching.
+    """
+    if len(launch_names) == 1:
+        return launch_names[0].rsplit("/", 1)[-1]
+    return code_name
+
+
+def _scan_cpp_file(path, src_root, builder, launch_map):
     rel_file = str(path.relative_to(src_root))
     package = path.relative_to(src_root).parts[0]
     is_test = "test" in path.relative_to(src_root).parts[1:-1]
@@ -415,17 +522,21 @@ def _scan_cpp_file(path, src_root, builder):
     calls = list(_CPP_CALL_RE.finditer(text))
     if not calls:
         return
-    # Whole-file node attribution (heuristic): the literal in ros::init(...),
-    # else the first class name found, else the file stem.
+    # Whole-file node attribution (heuristic): the name roslaunch gives this
+    # executable, else the literal in ros::init(...), else the first class
+    # name found, else the file stem.
     init_m = _CPP_INIT_NAME_RE.search(text)
     class_m = _CPP_CLASS_RE.search(text)
-    node_name = (
-        init_m.group(1) if init_m else (class_m.group(1) if class_m else path.stem)
+    launch_names = launch_map.get((package, path.stem), [])
+    node_name = _launch_name_or(
+        init_m.group(1) if init_m else (class_m.group(1) if class_m else path.stem),
+        launch_names,
     )
     node_id = "node:{}/{}".format(package, node_name)
     builder.ensure_node(
         node_id, node_name, package, rel_file,
         class_m.group(1) if class_m else None, is_test, language="cpp",
+        launch_names=launch_names,
     )
     for m in calls:
         kind = "pub" if m.group(1) == "advertise" else "sub"
@@ -442,10 +553,11 @@ def _scan_cpp_file(path, src_root, builder):
         builder.record(kind, msg_type, topic, expr_text, qos, node_id, rel_file, line)
 
 
-def _scan_file(path, src_root, builder):
+def _scan_file(path, src_root, builder, launch_map):
     rel_file = str(path.relative_to(src_root))
     package = path.relative_to(src_root).parts[0]
     is_test = "test" in path.relative_to(src_root).parts[1:-1]
+    launch_names = launch_map.get((package, path.stem), [])
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except (SyntaxError, UnicodeDecodeError) as exc:
@@ -488,9 +600,11 @@ def _scan_file(path, src_root, builder):
             continue
         scope = _Scope(module_consts)
         scope.collect_assigns(body)
-        node_name = _node_name_for_scope(body, file_node_name or cls.name)
+        node_name = _launch_name_or(
+            _node_name_for_scope(body, file_node_name or cls.name), launch_names)
         node_id = "node:{}/{}".format(package, node_name)
-        builder.ensure_node(node_id, node_name, package, rel_file, cls.name, is_test)
+        builder.ensure_node(node_id, node_name, package, rel_file, cls.name, is_test,
+                            launch_names=launch_names)
         for call in calls:
             builder.add_call(call, scope, node_id, msg_imports, rel_file)
 
@@ -508,9 +622,11 @@ def _scan_file(path, src_root, builder):
     if module_calls:
         scope = _Scope(module_consts)
         scope.collect_assigns(module_body)
-        node_name = _node_name_for_scope(module_body, path.stem)
+        node_name = _launch_name_or(
+            _node_name_for_scope(module_body, path.stem), launch_names)
         node_id = "node:{}/{}".format(package, node_name)
-        builder.ensure_node(node_id, node_name, package, rel_file, None, is_test)
+        builder.ensure_node(node_id, node_name, package, rel_file, None, is_test,
+                            launch_names=launch_names)
         for call in module_calls:
             builder.add_call(call, scope, node_id, msg_imports, rel_file)
 
@@ -600,10 +716,11 @@ def scan_workspace(src_root):
     """Scan every Python file under `src_root`; return the graph as a dict."""
     src_root = Path(src_root).resolve()
     builder = GraphBuilder()
+    launch_map = _scan_launch_files(src_root)
     for path in _iter_py_files(src_root):
-        _scan_file(path, src_root, builder)
+        _scan_file(path, src_root, builder, launch_map)
     for path in _iter_cpp_files(src_root):
-        _scan_cpp_file(path, src_root, builder)
+        _scan_cpp_file(path, src_root, builder, launch_map)
 
     topics = []
     for name, trec in sorted(builder.topics.items()):
@@ -617,6 +734,7 @@ def scan_workspace(src_root):
     summary = {
         "files_scanned": builder.files_scanned,
         "cpp_files_scanned": builder.cpp_files_scanned,
+        "launch_nodes_found": sum(len(v) for v in launch_map.values()),
         "parse_errors": builder.parse_errors,
         "node_count": len(builder.nodes),
         "topic_count": len(topics),
