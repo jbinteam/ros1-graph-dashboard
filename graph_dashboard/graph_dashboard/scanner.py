@@ -163,58 +163,173 @@ def _resolve_ros_name(name, ns, node_base):
     return _join_ns(ns, name)
 
 
-def _collect_launch_args(elem, args):
-    """Collect <arg> defaults across the whole file (last definition wins)."""
-    for child in elem.iter("arg"):
-        name = child.get("name")
-        val = child.get("default", child.get("value"))
-        if name and val is not None:
-            args[name] = _subst_args(val, args)
+_FIND_RE = re.compile(r"\$\(find\s+([A-Za-z0-9_-]+)\s*\)")
+_MAX_INCLUDE_DEPTH = 10
 
 
-def _collect_launch_nodes(elem, ns, out, pkg_fallback, args):
-    """Walk a launch tree, recording one instance per <node> element.
+def _package_dirs(src_root: Path):
+    """Map package name -> its directory, for resolving `$(find pkg)`."""
+    import xml.etree.ElementTree as ET
 
-    Each instance carries the namespace it runs in and its `<remap>` table,
-    resolved the way roslaunch resolves them, so the scanner can report the
-    topic names a run of THIS instance actually uses.
+    dirs = {}
+    for pkgxml in src_root.rglob("package.xml"):
+        if any(part in _EXCLUDE_DIRS for part in pkgxml.parts):
+            continue
+        name = None
+        try:
+            el = ET.parse(str(pkgxml)).getroot().find("name")
+            if el is not None and el.text:
+                name = el.text.strip()
+        except Exception:
+            pass
+        dirs.setdefault(name or pkgxml.parent.name, pkgxml.parent)
+    return dirs
+
+
+def _subst_find(text, pkg_dirs):
+    """Expand `$(find pkg)` to that package's directory in this workspace.
+
+    A package outside the scanned workspace keeps its literal `$(find pkg)`
+    text, which simply fails the is_file() check at the include site — an
+    unresolvable include is skipped, never guessed at.
+    """
+    if text is None:
+        return None
+    return _FIND_RE.sub(
+        lambda m: str(pkg_dirs[m.group(1)]) if m.group(1) in pkg_dirs else m.group(0),
+        text,
+    )
+
+
+def _collect_file_args(elem, args):
+    """Resolve one launch file's own <arg> values.
+
+    roslaunch scoping: `value=` always wins, `default=` only fills in an arg
+    the includer did not pass. `<arg>` elements inside an `<include>` are
+    arguments TO that child, not this file's, so those subtrees are skipped.
     """
     for child in elem:
-        if child.tag == "group":
-            joined = ns
-            child_ns = _subst_args(child.get("ns", ""), args)
-            if child_ns:
-                joined = _join_ns(ns, child_ns)
-            _collect_launch_nodes(child, joined, out, pkg_fallback, args)
+        if child.tag == "include":
             continue
-        if child.tag == "node":
-            pkg = _subst_args(child.get("pkg"), args) or pkg_fallback
+        if child.tag == "arg":
+            name = child.get("name")
+            if name:
+                value = child.get("value")
+                default = child.get("default")
+                if value is not None:
+                    args[name] = _subst_args(value, args)
+                elif name not in args and default is not None:
+                    args[name] = _subst_args(default, args)
+            continue
+        _collect_file_args(child, args)
+
+
+def _raw_remaps(elem, args):
+    """Direct-child <remap from= to=> pairs, unresolved (node ns decides)."""
+    pairs = []
+    for rm in elem.findall("remap"):
+        src = _subst_args(rm.get("from"), args)
+        dst = _subst_args(rm.get("to"), args)
+        if src and dst:
+            pairs.append((src, dst))
+    return pairs
+
+
+def _walk_launch(elem, ns, remaps, out, ctx, args):
+    """Walk a launch tree, recording one instance per <node> element.
+
+    `remaps` accumulates the `<remap>` pairs inherited from enclosing
+    `<group>`/`<include>` elements; a node's own remaps come last and win.
+    Each instance carries the namespace it runs in and its resolved remap
+    table, so the scanner can report the topic names a run of THIS instance
+    actually uses.
+    """
+    for child in elem:
+        tag = child.tag
+        if tag == "group":
+            g_ns = _subst_args(child.get("ns", ""), args)
+            _walk_launch(child, _join_ns(ns, g_ns) if g_ns else ns,
+                         remaps + _raw_remaps(child, args), out, ctx, args)
+        elif tag == "node":
+            pkg = _subst_args(child.get("pkg"), args) or ctx["pkg_fallback"]
             typ = _subst_args(child.get("type"), args)
             name = _subst_args(child.get("name"), args)
             if not (pkg and typ and name):
                 continue
-            full_ns = ns
-            node_ns = _subst_args(child.get("ns", ""), args)
-            if node_ns:
-                full_ns = _join_ns(ns, node_ns)
-            remaps = {}
-            for rm in child.findall("remap"):
-                src = _subst_args(rm.get("from"), args)
-                dst = _subst_args(rm.get("to"), args)
-                if src and dst:
-                    remaps[_resolve_ros_name(src, full_ns, name)] = \
-                        _resolve_ros_name(dst, full_ns, name)
+            n_ns = _subst_args(child.get("ns", ""), args)
+            full_ns = _join_ns(ns, n_ns) if n_ns else ns
+            resolved = {}
+            for src, dst in remaps + _raw_remaps(child, args):
+                resolved[_resolve_ros_name(src, full_ns, name)] = \
+                    _resolve_ros_name(dst, full_ns, name)
             out.setdefault((pkg, Path(typ).stem), []).append(
                 {
                     "base": name,
                     "ns": full_ns,
                     "full": _join_ns(full_ns, name),
-                    "remaps": remaps,
+                    "remaps": resolved,
                 }
             )
-            continue
-        # <include>, <arg>, … may still wrap nodes in some files.
-        _collect_launch_nodes(child, ns, out, pkg_fallback, args)
+        elif tag == "include":
+            _follow_include(child, ns, remaps, out, ctx, args)
+        else:
+            _walk_launch(child, ns, remaps, out, ctx, args)
+
+
+def _follow_include(elem, ns, remaps, out, ctx, args):
+    """Descend into an <include>d launch file with its passed <arg> values.
+
+    Real robot stacks are mostly a top-level launch file including per-
+    subsystem ones, so a scanner that stops at the first file sees almost
+    none of the system's real node names, namespaces, or remaps.
+    """
+    if ctx["depth"] >= _MAX_INCLUDE_DEPTH:
+        return
+    target = _subst_find(_subst_args(elem.get("file"), args), ctx["pkg_dirs"])
+    if not target:
+        return
+    path = Path(target)
+    if not path.is_file():
+        return  # $(find) outside this workspace, or a generated path
+    resolved = path.resolve()
+    if resolved in ctx["stack"]:
+        return  # include cycle
+    i_ns = _subst_args(elem.get("ns", ""), args)
+    passed = {}
+    for a in elem.findall("arg"):
+        name = a.get("name")
+        val = a.get("value", a.get("default"))
+        if name and val is not None:
+            passed[name] = _subst_args(val, args)
+    _parse_launch_file(
+        path, _join_ns(ns, i_ns) if i_ns else ns,
+        remaps + _raw_remaps(elem, args), out, ctx["pkg_dirs"], ctx["src_root"],
+        stack=ctx["stack"] | {resolved}, depth=ctx["depth"] + 1, passed_args=passed,
+    )
+
+
+def _parse_launch_file(path, ns, remaps, out, pkg_dirs, src_root,
+                       stack=frozenset(), depth=0, passed_args=None):
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.parse(str(path)).getroot()
+    except Exception:
+        return  # a malformed launch file must never kill the scan
+    args = dict(passed_args or {})
+    _collect_file_args(root, args)
+    try:
+        pkg_fallback = path.resolve().relative_to(src_root).parts[0]
+    except ValueError:
+        pkg_fallback = None
+    ctx = {
+        "pkg_dirs": pkg_dirs,
+        "src_root": src_root,
+        "stack": stack | {path.resolve()},
+        "depth": depth,
+        "pkg_fallback": pkg_fallback,
+    }
+    _walk_launch(root, ns, remaps, out, ctx, args)
 
 
 def _instance_topic(topic, inst):
@@ -241,19 +356,66 @@ def _scan_launch_files(src_root: Path):
     launched several times yields several instances, which the scanners
     expand into one graph node each: three camera pipelines built from one
     script are three nodes on three topic sets, as they are at runtime.
+
+    Only ENTRY-POINT files are parsed at top level — a file that some other
+    launch file `<include>`s is reached through that include instead, with
+    the namespace, args and remaps the includer gives it. Parsing it
+    standalone as well would invent a phantom instance running under the
+    file's own defaults, which nobody launches that way.
     """
-    import xml.etree.ElementTree as ET
+    src_root = Path(src_root).resolve()
+    pkg_dirs = _package_dirs(src_root)
+    files = list(_iter_launch_files(src_root))
+    included = _include_targets(files, pkg_dirs)
+    entries = [p for p in files if p.resolve() not in included]
+    if not entries:
+        entries = files  # every file includes another (cycle): parse them all
 
     out = {}
-    for path in _iter_launch_files(src_root):
+    for path in entries:
+        _parse_launch_file(path, "", [], out, pkg_dirs, src_root)
+    for key, instances in out.items():
+        out[key] = _dedupe_instances(instances)
+    return out
+
+
+def _include_targets(files, pkg_dirs):
+    """Resolved paths of every launch file included by another one."""
+    import xml.etree.ElementTree as ET
+
+    targets = set()
+    for path in files:
         try:
-            tree = ET.parse(str(path))
+            root = ET.parse(str(path)).getroot()
         except Exception:
-            continue  # a malformed launch file must never kill the scan
-        pkg_fallback = path.relative_to(src_root).parts[0]
+            continue
         args = {}
-        _collect_launch_args(tree.getroot(), args)
-        _collect_launch_nodes(tree.getroot(), "", out, pkg_fallback, args)
+        _collect_file_args(root, args)
+        for inc in root.iter("include"):
+            target = _subst_find(_subst_args(inc.get("file"), args), pkg_dirs)
+            if not target:
+                continue
+            try:
+                targets.add(Path(target).resolve())
+            except OSError:
+                pass
+    return targets
+
+
+def _dedupe_instances(instances):
+    """Drop instances identical in name, namespace and remaps.
+
+    Two entry-point files describing the same deployment would otherwise
+    each contribute the same running node.
+    """
+    seen = set()
+    out = []
+    for inst in instances:
+        sig = (inst["full"], inst["ns"], tuple(sorted(inst["remaps"].items())))
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append(inst)
     return out
 
 

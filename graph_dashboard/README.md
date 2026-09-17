@@ -39,6 +39,13 @@ also takes `--host` (default 127.0.0.1) and `--port` (default **8092** —
 8091 belongs to the sibling ROS 2 dashboard, so both can run at once on the
 same machine). `scan` takes `--output` (default `./graph.json`).
 
+**Viewing a robot's dashboard from your desk:** keep the default loopback
+bind and forward the port — `ssh -L 8092:127.0.0.1:8092 <robot>`, then open
+`http://127.0.0.1:8092/` locally. Prefer that over `--host 0.0.0.0`: the
+page serves source paths, the full topic list, and live message content
+including camera frames, which is fine on loopback and less fine on a lab
+network.
+
 ## Using the page
 
 - **Hover** a node or topic: lights its full transitive chain (everything
@@ -99,8 +106,18 @@ compose: `/?focus=camera_driver&hide=sim,tests`.
   that says `rospy.Subscriber("image_raw", …)` shows up as
   `/qr_cam_left/image_raw` under the launch entry that remaps it there.
   Unresolvable names appear as `?<expr>` placeholders and are counted in
-  the coverage summary. Parameter-server overrides applied at runtime are
-  still not modelled, and `<include>`d launch files are not followed.
+  the coverage summary.
+- **Launch files are followed through `<include>`**, with `$(find pkg)`
+  resolved against the workspace and `<arg>` values passed to the included
+  file — so the usual "one top-level launch including per-subsystem ones"
+  layout is covered, including the same file included twice with different
+  args. A file that some other launch file includes is only read through
+  that include, never also standalone, so its bare defaults never become a
+  phantom node. Include cycles stop, and depth is capped at 10.
+  **Not modelled:** `<node if=/unless=>` conditionals (a node is counted
+  whether or not its condition would hold), includes whose `$(find …)`
+  names a package outside this workspace (skipped), and parameter-server
+  overrides applied at runtime.
 - **One graph node per launch instance.** An executable launched several
   times (three camera pipelines from one script, say) becomes three nodes,
   each wired to its own remapped topics — the shape the live graph has.
@@ -172,6 +189,52 @@ picture never hides a running process.
 thread. Where ROS isn't sourced, or no `roscore` is reachable, `/api/live`
 reports `{"available": false, "reason": ...}`, the page shows a "live:
 unavailable" chip, and everything static keeps working.
+
+## Troubleshooting
+
+Run `rosrun graph_dashboard bench_test` first — it checks every endpoint on
+an ephemeral port and prints one line per check. Then, by symptom:
+
+**Chip says `live: unavailable`.** Either ROS isn't sourced in the shell
+that started `serve` (reason mentions `rosgraph not importable`) or no
+master is reachable (reason names the `ROS_MASTER_URI` it tried). Check
+`echo $ROS_MASTER_URI` and that `rosnode list` works from the same shell.
+
+**A node you know is running is not bold.** The overlay matches names, so
+this means the declared name and the master's name differ. Compare them:
+
+```bash
+python3 - <<'EOF'
+import json, urllib.request
+g = json.load(urllib.request.urlopen("http://127.0.0.1:8092/api/graph"))
+l = json.load(urllib.request.urlopen("http://127.0.0.1:8092/api/live"))
+static = sorted(n["node_name"] for n in g["nodes"])
+live = sorted(n["name"] for n in l.get("nodes", []))
+print("static:", static)
+print("live  :", live)
+print("matched:", sorted(set(static) & set(live)))
+EOF
+```
+
+Usual causes: the node is started by a launch file this scan can't see
+(one `<include>`d from outside the workspace, or a generated path), or it
+uses `rospy.init_node(..., anonymous=True)`, whose random suffix cannot be
+matched by name at all.
+
+**Tap shows 0 Hz although `rostopic hz` works.** Almost always ROS 1
+networking, not the dashboard: the master hands out a callback address the
+subscriber can't reach. Set `ROS_IP` (or `ROS_HOSTNAME`) to an address the
+publisher can actually route to, on both sides, and restart `serve`. A
+stale `ROS_IP` from an old network is the classic version of this — it
+fails silently, with the master reachable and no message ever arriving.
+
+**Topics look wrong / relative** (`image_raw` rather than
+`/camera/image_raw`). That name comes from a source file whose launch
+entry the scan didn't find, so no namespace or `<remap>` was applied. See
+the launch-file limits in the design rules above.
+
+**Port 8092 already in use.** Another dashboard is running — `--port N`
+picks a different one.
 
 ## Compatibility
 

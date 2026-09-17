@@ -281,6 +281,101 @@ def test_relative_topic_resolves_against_launch_namespace(tmp_path):
     assert {t["name"] for t in graph["topics"]} == {"/arm/camera_info", "/arm/image_raw"}
 
 
+def _include_ws(tmp_path, top_xml, child_xml, pkg="demo_pkg"):
+    src = tmp_path / "catkin_ws" / "src"
+    scripts = src / pkg / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "cam.py").write_text(textwrap.dedent(_RELATIVE_TOPIC_NODE), encoding="utf-8")
+    (src / pkg / "package.xml").write_text(
+        "<package><name>{}</name></package>".format(pkg), encoding="utf-8")
+    launch = src / pkg / "launch"
+    launch.mkdir(parents=True)
+    (launch / "top.launch").write_text(textwrap.dedent(top_xml), encoding="utf-8")
+    (launch / "camera.launch").write_text(textwrap.dedent(child_xml), encoding="utf-8")
+    return src
+
+
+_CHILD_LAUNCH = """
+    <launch>
+      <arg name="cam" default="unset"/>
+      <node pkg="demo_pkg" type="cam.py" name="$(arg cam)_info">
+        <remap from="image_raw" to="/$(arg cam)/image_raw"/>
+      </node>
+    </launch>
+"""
+
+
+def test_include_is_followed_with_passed_args(tmp_path):
+    # The dominant real-stack shape: one top-level launch including a
+    # per-subsystem file twice with different args. Both instances must
+    # appear, each with the args the includer passed.
+    src = _include_ws(tmp_path, """
+        <launch>
+          <include file="$(find demo_pkg)/launch/camera.launch">
+            <arg name="cam" value="left"/>
+          </include>
+          <include file="$(find demo_pkg)/launch/camera.launch">
+            <arg name="cam" value="right"/>
+          </include>
+        </launch>
+    """, _CHILD_LAUNCH)
+    graph = scan_workspace(src)
+    assert {n["node_name"] for n in graph["nodes"]} == {"left_info", "right_info"}
+    topics = {t["name"] for t in graph["topics"]}
+    assert "/left/image_raw" in topics and "/right/image_raw" in topics
+    # The child file is reached through the include, never parsed standalone,
+    # so its own "unset" default never becomes a phantom node.
+    assert "unset_info" not in {n["node_name"] for n in graph["nodes"]}
+
+
+def test_include_namespace_and_inherited_remap(tmp_path):
+    # <include ns=> namespaces everything inside, and a <remap> on the
+    # include applies to the nodes it pulls in.
+    src = _include_ws(tmp_path, """
+        <launch>
+          <include file="$(find demo_pkg)/launch/camera.launch" ns="arm">
+            <arg name="cam" value="wrist"/>
+            <remap from="camera_info" to="/shared/camera_info"/>
+          </include>
+        </launch>
+    """, _CHILD_LAUNCH)
+    graph = scan_workspace(src)
+    node = graph["nodes"][0]
+    assert node["node_name"] == "wrist_info"
+    assert node["launch_names"] == ["/arm/wrist_info"]
+    topics = {t["name"] for t in graph["topics"]}
+    # include-level remap applied; the child's own remap is global already.
+    assert topics == {"/shared/camera_info", "/wrist/image_raw"}
+
+
+def test_include_cycle_terminates(tmp_path):
+    src = _include_ws(tmp_path, """
+        <launch>
+          <include file="$(find demo_pkg)/launch/camera.launch"/>
+        </launch>
+    """, """
+        <launch>
+          <include file="$(find demo_pkg)/launch/top.launch"/>
+          <node pkg="demo_pkg" type="cam.py" name="cyclic_info"/>
+        </launch>
+    """)
+    graph = scan_workspace(src)  # must not hang or recurse forever
+    assert "cyclic_info" in {n["node_name"] for n in graph["nodes"]}
+
+
+def test_unresolvable_include_is_skipped(tmp_path):
+    # $(find other_pkg) for a package outside the workspace can't resolve;
+    # the include is skipped rather than guessed at.
+    src = _include_ws(tmp_path, """
+        <launch>
+          <include file="$(find not_in_this_ws)/launch/x.launch"/>
+          <node pkg="demo_pkg" type="cam.py" name="local_info"/>
+        </launch>
+    """, _CHILD_LAUNCH)
+    graph = scan_workspace(src)
+    assert "local_info" in {n["node_name"] for n in graph["nodes"]}
+
+
 def test_no_launch_file_leaves_topics_untouched(tmp_path):
     # Without a launch file there is no namespace or remap to apply; the
     # source's own names stand, exactly as before.
