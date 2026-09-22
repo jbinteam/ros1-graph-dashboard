@@ -309,7 +309,10 @@ tiers, node-naming fallbacks, C++ value/pointer NodeHandle spellings,
 reachability closures (cycle-safe), and ego depth clamping, plus the
 live-only-element HTTP tests, the per-node host lookup, and the tap's
 image renderers (the renderer tests skip themselves where OpenCV is
-absent — it is needed only by the tap). Inside a built workspace,
+absent — it is needed only by the tap). `test/frontend_harness.js` runs
+the real page script under Node against a synthetic `/api/live` sample, so
+the graph's filter rules are tested rather than eyeballed; those tests skip
+where Node is absent. Inside a built workspace,
 `catkin_make run_tests --pkg graph_dashboard` runs the same suite —
 `CMakeLists.txt` registers pytest through `catkin_run_tests_target` rather
 than `catkin_add_nosetests`, because these tests use pytest fixtures
