@@ -60,6 +60,13 @@ network.
   the panel closes. The strip's Hz/bandwidth are the topic's TRUE measured
   rate; the display itself is polled at only 2 Hz and shows the newest
   message each poll, so a choppy preview does not mean a slow topic.
+  `CompressedImage` topics render as thumbnails too — jpeg/png, and
+  `compressedDepth` colorized like raw depth (dequantized first when the
+  source was 32FC1, or the reported meters would be wrong). `theora` and
+  RVL-coded depth need the codec's streaming state rather than a
+  self-contained frame, and say so instead of failing obscurely. Note that
+  image_transport variants like `/compressed` sit behind a legend chip by
+  default, so turn that chip on to reach them.
 - **Host chips** scope the graph to one machine. ROS 1 systems are
   routinely spread across several PCs, so every running node carries the
   host the master reports for it (its XML-RPC address, resolved to an IP
@@ -98,7 +105,7 @@ compose: `/?focus=camera_driver&hide=sim,tests`.
 | `GET /api/graph` | full static graph JSON (nodes, topics, edges with queue/latch info, per-element reachability closures, coverage summary) — re-scanned per request, so a reload always reflects the current source |
 | `GET /api/ego?id=<element>` | signed-distance ego graph of one element (negative = inputs, positive = outputs), clamped to the direct neighborhood (±2 for nodes, ±1 for topics); 404 for unknown ids |
 | `GET /api/live` | live-graph snapshot: running nodes (each with the `host`/`ip`/`uri` the master reports for it) and topic endpoint counts, sampled every ~2 s from the ROS master |
-| `GET /api/tap?id=topic:/<name>` | on-demand live tap of ONE topic: Hz, bandwidth, latest message (JPEG thumbnail for images, truncated field tree otherwise). Poll-driven lifecycle — first poll subscribes (raw, best-effort), ~5 s without polls unsubscribes; max 3 concurrent taps; honest JSON statuses for dead topics; 404 for unknown ids |
+| `GET /api/tap?id=topic:/<name>` | on-demand live tap of ONE topic: Hz, bandwidth, latest message (JPEG thumbnail for images — raw or compressed — truncated field tree otherwise). Poll-driven lifecycle — first poll subscribes (raw, best-effort), ~5 s without polls unsubscribes; max 3 concurrent taps; honest JSON statuses for dead topics; 404 for unknown ids |
 | `GET /` | the dashboard page |
 | `GET /vendor/vis-network.min.js` | vendored render library (offline lab use) |
 
@@ -300,7 +307,9 @@ of the vendored file.
 `python3 -m pytest test/` runs unit tests for the scanner's resolution
 tiers, node-naming fallbacks, C++ value/pointer NodeHandle spellings,
 reachability closures (cycle-safe), and ego depth clamping, plus the
-live-only-element HTTP tests. Inside a built workspace,
+live-only-element HTTP tests, the per-node host lookup, and the tap's
+image renderers (the renderer tests skip themselves where OpenCV is
+absent — it is needed only by the tap). Inside a built workspace,
 `catkin_make run_tests --pkg graph_dashboard` runs the same suite —
 `CMakeLists.txt` registers pytest through `catkin_run_tests_target` rather
 than `catkin_add_nosetests`, because these tests use pytest fixtures

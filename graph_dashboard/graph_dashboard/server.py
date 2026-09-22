@@ -327,6 +327,29 @@ def _colorize_depth(depth, valid_mask, is_float_meters):
     }
 
 
+def _thumbnail_result(bgr, source_size, meta=None):
+    """Downscale a BGR frame to <=480 wide and JPEG-encode it for the panel."""
+    import base64
+
+    import cv2
+
+    height, width = bgr.shape[:2]
+    if width > 480:
+        scale = 480.0 / width
+        bgr = cv2.resize(bgr, (480, max(1, int(height * scale))))
+    ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+    if not ok:
+        return {"kind": "note", "note": "jpeg encode failed"}
+    result = {
+        "kind": "image",
+        "jpeg_b64": base64.b64encode(buf.tobytes()).decode("ascii"),
+        "source_size": source_size,
+    }
+    if meta is not None:
+        result["depth_meta"] = meta
+    return result
+
+
 def _render_image(msg):
     """Render a sensor_msgs/Image to a JPEG thumbnail.
 
@@ -337,8 +360,6 @@ def _render_image(msg):
     OpenCV), with zero/invalid pixels rendered black and the true depth
     range (meters) reported in `depth_meta` for the data panel.
     """
-    import base64
-
     import cv2
 
     encoding = msg.encoding
@@ -369,20 +390,81 @@ def _render_image(msg):
     else:
         return {"kind": "note", "note": "unsupported image encoding: {}".format(encoding)}
 
-    if width > 480:
-        scale = 480.0 / width
-        bgr = cv2.resize(bgr, (480, max(1, int(height * scale))))
-    ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
-    if not ok:
-        return {"kind": "note", "note": "jpeg encode failed"}
-    result = {
-        "kind": "image",
-        "jpeg_b64": base64.b64encode(buf.tobytes()).decode("ascii"),
-        "source_size": "{}x{} {}".format(width, height, encoding),
-    }
-    if meta is not None:
-        result["depth_meta"] = meta
-    return result
+    return _thumbnail_result(bgr, "{}x{} {}".format(width, height, encoding), meta)
+
+
+# compressed_depth_image_transport prefixes its PNG/RVL payload with a
+# ConfigHeader: an int format enum plus two float quantization params.
+_COMPRESSED_DEPTH_HEADER_BYTES = 12
+
+
+def _render_compressed_image(msg):
+    """Render a sensor_msgs/CompressedImage to a JPEG thumbnail.
+
+    Covers what image_transport actually puts on the wire: `jpeg`/`png`
+    color and mono frames, decoded by OpenCV, and `compressedDepth`, whose
+    payload is NOT a bare image — it carries a 12-byte ConfigHeader that
+    imdecode chokes on, so it is stripped first.
+
+    Depth quantization matters for correctness, not just looks: a 16UC1
+    source is PNG-encoded as raw millimeters, but a 32FC1 source is
+    quantized to uint16 as `quant_a / (pixel - quant_b)` with the two
+    params living in that header. Colorizing the quantized values directly
+    would report a plausible-looking but wrong meter range, so the inverse
+    is applied before `_colorize_depth` sees them.
+
+    `theora` (and RVL-coded depth) are not decodable here — they need the
+    codec's streaming state, not a self-contained frame — and say so
+    instead of failing obscurely.
+    """
+    import struct
+
+    import cv2
+    import numpy as np
+
+    fmt = (getattr(msg, "format", "") or "").strip()
+    fmt_key = fmt.lower().replace(" ", "")
+    raw = np.frombuffer(msg.data, dtype=np.uint8)
+    if raw.size == 0:
+        return {"kind": "note", "note": "empty compressed payload (format: {})".format(fmt)}
+    wire_kb = round(raw.size / 1024.0, 1)
+
+    if "compresseddepth" in fmt_key:
+        if raw.size <= _COMPRESSED_DEPTH_HEADER_BYTES:
+            return {"kind": "note", "note": "compressedDepth payload too short"}
+        quant_a, quant_b = struct.unpack_from(
+            "<ff", raw[:_COMPRESSED_DEPTH_HEADER_BYTES].tobytes(), 4)
+        decoded = cv2.imdecode(raw[_COMPRESSED_DEPTH_HEADER_BYTES:], cv2.IMREAD_UNCHANGED)
+        if decoded is None:
+            return {"kind": "note",
+                    "note": "compressedDepth not decodable (format: {}) — RVL coding "
+                            "needs the transport plugin".format(fmt)}
+        if "32fc1" in fmt_key and quant_a:
+            valid = decoded > 0
+            meters = np.zeros(decoded.shape, np.float32)
+            meters[valid] = quant_a / (decoded[valid].astype(np.float32) - quant_b)
+            bgr, meta = _colorize_depth(meters, valid, is_float_meters=True)
+        elif decoded.dtype == np.uint16:
+            bgr, meta = _colorize_depth(decoded, decoded != 0, is_float_meters=False)
+        else:
+            return {"kind": "note",
+                    "note": "unsupported compressedDepth payload: {}".format(decoded.dtype)}
+        height, width = decoded.shape[:2]
+        return _thumbnail_result(
+            bgr, "{}x{} {} ({} KB wire)".format(width, height, fmt, wire_kb), meta)
+
+    if "theora" in fmt_key:
+        return {"kind": "note",
+                "note": "theora is a video stream, not a self-contained frame — "
+                        "tap the raw image topic instead"}
+
+    bgr = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+    if bgr is None:
+        return {"kind": "note",
+                "note": "could not decode compressed image (format: {})".format(fmt)}
+    height, width = bgr.shape[:2]
+    return _thumbnail_result(
+        bgr, "{}x{} {} ({} KB wire)".format(width, height, fmt, wire_kb))
 
 
 _PC2_MAX_POINTS = 30000  # payload budget: keeps xyz+rgb base64 well under ~2 MB
@@ -547,13 +629,18 @@ def _render_pointcloud(msg):
 def _render_message(msg, msg_type):
     """Render a deserialized message for the tap strip.
 
-    JPEG thumbnail for images (color, grayscale, or colorized depth),
-    a compact 3D point payload for PointCloud2, truncated field tree
-    otherwise. Runs at poll time (<= ~2 Hz), never in the subscriber
-    callback.
+    JPEG thumbnail for images — raw or image_transport-compressed, color,
+    grayscale or colorized depth — a compact 3D point payload for
+    PointCloud2, truncated field tree otherwise. Runs at poll time
+    (<= ~2 Hz), never in the subscriber callback.
     """
     if msg_type == "sensor_msgs/Image":
         return _render_image(msg)
+    if msg_type == "sensor_msgs/CompressedImage":
+        try:
+            return _render_compressed_image(msg)
+        except Exception as exc:
+            return {"kind": "note", "note": "compressed render failed: {}".format(exc)}
     if msg_type == "sensor_msgs/PointCloud2":
         try:
             return _render_pointcloud(msg)
