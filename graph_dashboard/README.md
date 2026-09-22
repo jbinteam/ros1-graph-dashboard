@@ -60,6 +60,13 @@ network.
   the panel closes. The strip's Hz/bandwidth are the topic's TRUE measured
   rate; the display itself is polled at only 2 Hz and shows the newest
   message each poll, so a choppy preview does not mean a slow topic.
+- **Host chips** scope the graph to one machine. ROS 1 systems are
+  routinely spread across several PCs, so every running node carries the
+  host the master reports for it (its XML-RPC address, resolved to an IP
+  where DNS can). "all hosts" is the default; clicking a host chip shows
+  only the nodes on that machine, and clicking it again returns to all. A
+  node with no host is not running anywhere, so it hides while a host is
+  selected. Hover any node to see its host in the tooltip.
 - **Legend chips** are filters: click a package chip to hide/show that
   package (topics hide only when *every* node touching them is hidden);
   "hide test harnesses" hides the dashed bench/test elements. Filters apply
@@ -78,6 +85,7 @@ network.
 | `?highlight=<name>` | light that element's chain on load | `/?highlight=camera_driver` |
 | `?focus=<name>` | open the focus panel on load | `/?focus=/estop` |
 | `?hide=<list>` | comma-separated packages and/or `tests` to hide | `/?hide=sim,tests` |
+| `?host=<ip>` | show only nodes running on that machine | `/?host=192.168.1.22` |
 
 Names accept a node name, a topic name (with or without the leading `/`),
 or a full element id (`node:<pkg>/<name>`, `topic:/<name>`). Parameters
@@ -89,7 +97,7 @@ compose: `/?focus=camera_driver&hide=sim,tests`.
 |----------|---------|
 | `GET /api/graph` | full static graph JSON (nodes, topics, edges with queue/latch info, per-element reachability closures, coverage summary) — re-scanned per request, so a reload always reflects the current source |
 | `GET /api/ego?id=<element>` | signed-distance ego graph of one element (negative = inputs, positive = outputs), clamped to the direct neighborhood (±2 for nodes, ±1 for topics); 404 for unknown ids |
-| `GET /api/live` | live-graph snapshot: running nodes and topic endpoint counts, sampled every ~2 s from the ROS master |
+| `GET /api/live` | live-graph snapshot: running nodes (each with the `host`/`ip`/`uri` the master reports for it) and topic endpoint counts, sampled every ~2 s from the ROS master |
 | `GET /api/tap?id=topic:/<name>` | on-demand live tap of ONE topic: Hz, bandwidth, latest message (JPEG thumbnail for images, truncated field tree otherwise). Poll-driven lifecycle — first poll subscribes (raw, best-effort), ~5 s without polls unsubscribes; max 3 concurrent taps; honest JSON statuses for dead topics; 404 for unknown ids |
 | `GET /` | the dashboard page |
 | `GET /vendor/vis-network.min.js` | vendored render library (offline lab use) |
@@ -180,6 +188,11 @@ pure XML-RPC queries against `ROS_MASTER_URI`, so unlike the ROS 2 version
 side effect. A static node is marked **running** when a live node's base
 name matches either its declared name or any of its launch-file names
 (see node naming above — roslaunch's `name=` is what the master reports).
+Each running node also carries **where** it runs: `lookupNode` gives its
+XML-RPC URI, whose host is resolved to an IP where DNS allows, cached per
+node (a node's URI is fixed for its lifetime, so this costs one extra
+master call per node ever, not per sample) and dropped when the node
+leaves the graph.
 Running nodes render saturated with a bold green border; declared-but-idle
 nodes dim; live nodes that appear in no source file (`rviz`, an anonymous
 `rostopic echo`, …) render as dotted ellipses beneath the graph so the

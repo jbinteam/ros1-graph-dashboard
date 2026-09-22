@@ -118,6 +118,7 @@
   <span class="chip"><span class="swatch" style="border:2.5px solid #1a237e;background:#cfd8dc"></span>dark ring = C++ node</span>
   <span class="chip">hover = light full chain · click = focus panel</span>
   <span id="pkg-chips"></span>
+  <span id="host-chips"></span>
   <span class="chip toggle" id="tests-toggle" title="hide/show dashed test-harness elements">hide test harnesses</span>
   <span class="chip toggle" id="transport-toggle"
         title="hide/show image_transport derivative topics (.../compressed, .../compressedDepth, .../theora, .../zstd) — auto-generated plumbing, 4+ per image topic">hide transport variants</span>
@@ -183,6 +184,11 @@ let hiddenPkgs = new Set();   // package filter (main graph only)
 let hideTests = false;        // test-harness filter (main graph only)
 let hideTransport = true;     // image_transport derivative-topic filter — noisy, hidden by default
 let showActiveOnly = false;   // all-nodes-in-package (default) vs. active-nodes-only view
+// Host filter (ROS 1 is routinely multi-machine): null = every host, else
+// the one host key — an IP where resolvable, otherwise the hostname the
+// master reports — whose nodes are shown alone.
+let hostFilter = null;
+let liveHosts = new Map();    // host key -> {host, ip, count} from the last live sample
 let topicTouchers = {};       // topic id -> Set of static node ids on it
 let staticElementIds = [];    // node/topic ids from the static scan (layout recompute input)
 let staticLayoutEdges = [];   // static scan edges (layout recompute input)
@@ -248,6 +254,7 @@ function tooltipEl(lines) {
 function nodeTooltip(id) {
   const b = base[id];
   const lines = [`<b>${esc(b.name)}</b>`, esc(b.title)];
+  if (b.hostLabel) lines.push(`<b>host:</b> ${esc(b.hostLabel)}`);
   const pubs = staticEdges.filter(e => e.kind === "pub" && e.source === id);
   const subs = staticEdges.filter(e => e.kind === "sub" && e.target === id);
   if (pubs.length) {
@@ -298,6 +305,10 @@ function isHiddenMain(id) {
     // idle right now) — a live-unavailable graph shows everything, since
     // "active" can't be determined without a live sample.
     if (showActiveOnly && liveAvail && !isActiveNode(id)) return true;
+    // Host filter: show only what runs on the chosen machine. A node with
+    // no host is one the master isn't running right now, so it cannot be
+    // on that machine either — hidden rather than shown ambiguously.
+    if (hostFilter !== null && b.hostKey !== hostFilter) return true;
     return hiddenPkgs.has(b.pkg) || (hideTests && b.isTest);
   }
   // Transport-variant topics hide outright — noise regardless of whether
@@ -316,7 +327,49 @@ function syncHideUrl() {
   const url = new URL(location.href);
   if (parts.length) url.searchParams.set("hide", parts.join(","));
   else url.searchParams.delete("hide");
+  if (hostFilter !== null) url.searchParams.set("host", hostFilter);
+  else url.searchParams.delete("host");
   history.replaceState(null, "", url);
+}
+
+// Which machine an element sits on, for the host chips and filter. The key
+// prefers the IP (stable across the hostname spellings a mixed network
+// reports) and falls back to the hostname where DNS can't resolve it here.
+function hostKeyOf(info) {
+  if (!info) return null;
+  return info.ip || info.host || null;
+}
+
+function hostLabel(entry) {
+  if (!entry) return "";
+  if (entry.ip && entry.host && entry.host !== entry.ip) {
+    return `${entry.ip} (${entry.host})`;
+  }
+  return entry.ip || entry.host || "";
+}
+
+function renderHostChips() {
+  const el = document.getElementById("host-chips");
+  if (!liveHosts.size) { el.innerHTML = ""; return; }
+  const chips = [
+    `<span class="chip toggle${hostFilter === null ? "" : " off"}" data-host="" ` +
+    `style="margin-left:10px" title="show nodes on every machine">all hosts</span>`,
+  ];
+  for (const [key, entry] of [...liveHosts.entries()].sort()) {
+    const on = hostFilter === key;
+    chips.push(
+      `<span class="chip toggle${on || hostFilter === null ? "" : " off"}" ` +
+      `data-host="${esc(key)}" title="show only the ${entry.count} node(s) running on ` +
+      `${esc(hostLabel(entry))}">${esc(hostLabel(entry))} (${entry.count})</span>`);
+  }
+  el.innerHTML = chips.join("");
+  for (const chip of el.querySelectorAll(".toggle")) {
+    chip.addEventListener("click", () => {
+      const key = chip.dataset.host;
+      hostFilter = (!key || hostFilter === key) ? null : key;
+      syncHideUrl(); renderFilterChips(); restyle();
+    });
+  }
 }
 
 function renderFilterChips() {
@@ -335,6 +388,7 @@ function renderFilterChips() {
   aChip.textContent = idleCount === null
     ? "hide idle nodes"
     : `hide idle nodes (${idleCount})`;
+  renderHostChips();
 }
 
 // ------------------------------------------------------------- restyle
@@ -909,6 +963,30 @@ function applyLive(live) {
     liveBase.has(b.name) || (b.launchNames || []).some(n => liveBase.has(n));
   runningIds = new Set(Object.keys(base).filter(
     id => base[id].kind === "node" && nodeMatchesLive(base[id])));
+
+  // Which machine each running node is on. ROS 1 systems are routinely
+  // spread over several PCs, and the master knows every node's XML-RPC
+  // host, so carry it onto the static nodes too — the host chips and the
+  // tooltip both read it from base[].
+  const liveByName = new Map();
+  for (const n of live.nodes) liveByName.set(n.name, n);
+  liveHosts = new Map();
+  const noteHost = info => {
+    const key = hostKeyOf(info);
+    if (!key) return null;
+    const entry = liveHosts.get(key) || { host: info.host, ip: info.ip, count: 0 };
+    entry.count += 1;
+    liveHosts.set(key, entry);
+    return key;
+  };
+  for (const [id, b] of Object.entries(base)) {
+    if (b.kind !== "node" || b.liveOnly) continue;
+    const match = liveByName.get(b.name) ||
+                  (b.launchNames || []).map(n => liveByName.get(n)).find(Boolean);
+    const info = match && (match.host || match.ip) ? match : null;
+    b.hostKey = info ? noteHost(info) : null;
+    b.hostLabel = info ? hostLabel(info) : "";
+  }
   // Names that count as "already covered by a static node" when deciding
   // which live nodes are live-only — launch aliases included, or a
   // launch-renamed node would be drawn twice (once static, once dotted).
@@ -955,7 +1033,9 @@ function applyLive(live) {
         kind: "node", name: n.full, shape: "ellipse", mono: false,
         bg: "#eceff1", bgHex: "#eceff1", border: "#607d8b", baseBw: 1,
         pkg: null, isTest: false, dashes: [2, 3], liveOnly: true,
-        title: "running, but not declared anywhere in the scanned source",
+        hostKey: noteHost(n), hostLabel: hostLabel(n),
+        title: "running, but not declared anywhere in the scanned source" +
+               (hostLabel(n) ? ` — on ${hostLabel(n)}` : ""),
       });
     }
   }
@@ -1268,6 +1348,12 @@ async function load() {
       else if (packages.includes(part)) hiddenPkgs.add(part);
     }
   }
+  // ?host=<ip-or-hostname> scopes the view to one machine. Kept even when
+  // that host has no nodes in the first live sample yet — the filter
+  // starts applying as soon as the host appears, rather than being
+  // silently dropped on load.
+  const hostParam = new URLSearchParams(location.search).get("host");
+  if (hostParam) hostFilter = hostParam;
   renderFilterChips();
   for (const vn of visNodes) vn.hidden = isHiddenMain(vn.id);
   for (const ve of visEdges) ve.hidden = isHiddenMain(ve.from) || isHiddenMain(ve.to);

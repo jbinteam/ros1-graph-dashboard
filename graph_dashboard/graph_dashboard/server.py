@@ -72,6 +72,8 @@ class LiveProber:
     def __init__(self):
         self._lock = threading.Lock()
         self._state = {"available": False, "reason": "probe starting"}
+        self._host_cache = {}  # node full name -> {"uri", "host", "ip"}
+        self._ip_cache = {}  # hostname -> ip string (or None once it fails)
         self._thread = threading.Thread(target=self._run, daemon=True, name="live-probe")
         self._thread.start()
 
@@ -82,6 +84,45 @@ class LiveProber:
     def _set(self, state):
         with self._lock:
             self._state = state
+
+    def _resolve_ip(self, host):
+        """Hostname -> IP, cached (including failures, to stop retry storms)."""
+        if host in self._ip_cache:
+            return self._ip_cache[host]
+        import socket
+
+        try:
+            ip = socket.gethostbyname(host)
+        except Exception:
+            ip = None  # unresolvable from here — the hostname is still useful
+        self._ip_cache[host] = ip
+        return ip
+
+    def _node_host(self, master, full_name):
+        """Where a node runs: its XML-RPC URI host, plus that host's IP.
+
+        `lookupNode` is one round trip per node, so results are cached by
+        node name: a node's URI is fixed for its lifetime, and re-asking
+        every 2 s would put a per-node XML-RPC call on the master forever.
+        Entries for nodes that leave the graph are dropped by the caller.
+        """
+        cached = self._host_cache.get(full_name)
+        if cached is not None:
+            return cached
+        try:
+            uri = master.lookupNode(full_name)
+        except Exception:
+            return None  # node vanished between getSystemState and now
+        host = None
+        try:
+            host = urllib.parse.urlparse(uri).hostname
+        except Exception:
+            pass
+        if not host:
+            return None
+        info = {"uri": uri, "host": host, "ip": self._resolve_ip(host)}
+        self._host_cache[full_name] = info
+        return info
 
     def _sample(self, master):
         pubs, subs, _services = master.getSystemState()
@@ -109,10 +150,22 @@ class LiveProber:
                 edges.append({"node": n, "topic": tname, "kind": "pub"})
             for n in sub_names:
                 edges.append({"node": n, "topic": tname, "kind": "sub"})
-        nodes = [
-            {"name": n.rsplit("/", 1)[-1], "namespace": n.rsplit("/", 1)[0] or "/", "full": n}
-            for n in sorted(node_names)
-        ]
+        nodes = []
+        for n in sorted(node_names):
+            entry = {
+                "name": n.rsplit("/", 1)[-1],
+                "namespace": n.rsplit("/", 1)[0] or "/",
+                "full": n,
+            }
+            info = self._node_host(master, n)
+            if info:
+                entry.update(info)
+            nodes.append(entry)
+        # Forget nodes that left the graph, so the cache tracks the system
+        # rather than growing for the life of the process (and so a node
+        # restarted on another machine is looked up afresh).
+        for gone in set(self._host_cache) - node_names:
+            self._host_cache.pop(gone, None)
         return {
             "available": True,
             "sampled_at": time.time(),

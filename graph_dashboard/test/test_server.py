@@ -78,6 +78,93 @@ def test_live_only_ego_probe_unavailable_returns_none():
     assert srv._live_only_ego("topic:/live/only/points", unavailable) is None
 
 
+# --------------------------------------------------- per-node host lookup
+class _FakeMaster:
+    """Minimal rosgraph.Master stand-in that counts lookupNode round trips."""
+
+    def __init__(self, uris):
+        self.uris = uris
+        self.lookups = []
+
+    def lookupNode(self, name):  # noqa: N802 — rosgraph API name
+        self.lookups.append(name)
+        if name not in self.uris:
+            raise RuntimeError("unknown node")
+        return self.uris[name]
+
+
+def _prober():
+    # __init__ starts the probe thread, which finds no rosgraph here and
+    # parks itself as unavailable — the host helpers are what we exercise.
+    return srv.LiveProber()
+
+
+def test_node_host_reports_host_and_ip(monkeypatch):
+    monkeypatch.setattr("socket.gethostbyname", lambda h: "10.0.0.7")
+    p = _prober()
+    master = _FakeMaster({"/talker": "http://robot-pc:41234/"})
+    assert p._node_host(master, "/talker") == {
+        "uri": "http://robot-pc:41234/", "host": "robot-pc", "ip": "10.0.0.7"}
+
+
+def test_node_host_is_cached_per_node(monkeypatch):
+    # A node's URI is fixed for its lifetime; re-asking every 2 s would put
+    # a per-node XML-RPC call on the master forever.
+    monkeypatch.setattr("socket.gethostbyname", lambda h: "10.0.0.7")
+    p = _prober()
+    master = _FakeMaster({"/talker": "http://robot-pc:41234/"})
+    for _ in range(5):
+        p._node_host(master, "/talker")
+    assert master.lookups == ["/talker"]
+
+
+def test_node_host_keeps_hostname_when_dns_fails(monkeypatch):
+    def boom(host):
+        raise OSError("no DNS here")
+
+    monkeypatch.setattr("socket.gethostbyname", boom)
+    p = _prober()
+    info = p._node_host(_FakeMaster({"/n": "http://build-box:5/"}), "/n")
+    assert info["host"] == "build-box" and info["ip"] is None
+
+
+def test_node_host_none_when_node_vanished():
+    # getSystemState listed it, then it died before lookupNode — must not
+    # raise, and must not be cached as a permanent negative.
+    p = _prober()
+    master = _FakeMaster({})
+    assert p._node_host(master, "/gone") is None
+    assert p._host_cache == {}
+
+
+def test_sample_attaches_hosts_and_forgets_departed_nodes(monkeypatch):
+    monkeypatch.setattr("socket.gethostbyname", lambda h: h)
+    p = _prober()
+
+    class M(_FakeMaster):
+        def __init__(self, uris, state):
+            super().__init__(uris)
+            self.state = state
+
+        def getSystemState(self):  # noqa: N802 — rosgraph API name
+            return self.state
+
+        def getTopicTypes(self):  # noqa: N802 — rosgraph API name
+            return [["/chatter", "std_msgs/String"]]
+
+    both = [[["/chatter", ["/talker"]]], [["/chatter", ["/listener"]]], []]
+    master = M({"/talker": "http://10.0.0.1:1/", "/listener": "http://10.0.0.2:2/"}, both)
+    sample = p._sample(master)
+    hosts = {n["full"]: n.get("ip") for n in sample["nodes"]}
+    assert hosts == {"/talker": "10.0.0.1", "/listener": "10.0.0.2"}
+
+    # /listener leaves the graph: its cache entry goes with it, so the same
+    # name restarted on another machine is looked up afresh.
+    master.state = [[["/chatter", ["/talker"]]], [], []]
+    p._sample(master)
+    assert set(p._host_cache) == {"/talker"}
+
+
 # --------------------------------------------------------- _ScanCache
 def test_scan_cache_hits_within_ttl_then_refreshes_on_expiry_or_src_change(monkeypatch):
     calls = []
