@@ -190,6 +190,10 @@ let showActiveOnly = false;   // all-nodes-in-package (default) vs. active-nodes
 let hostFilter = null;
 let liveHosts = new Map();    // host key -> {host, ip, count} from the last live sample
 let topicTouchers = {};       // topic id -> Set of static node ids on it
+// Same thing for LIVE pub/sub: a topic that exists only at runtime has no
+// static toucher at all, so without this a filter could hide every node on
+// a machine and still leave that machine's topics floating on screen.
+let liveTopicTouchers = {};   // topic id -> Set of element ids seen live on it
 let staticElementIds = [];    // node/topic ids from the static scan (layout recompute input)
 let staticLayoutEdges = [];   // static scan edges (layout recompute input)
 let liveOnlySetSig = "";      // sorted-joined live-only id set — gates re-layout (no per-poll jitter)
@@ -315,8 +319,9 @@ function isHiddenMain(id) {
   // the node that made them is itself hidden (applies to static AND
   // live-only topics alike, since isTransportVariant only looks at name).
   if (hideTransport && isTransportVariant(b.name)) return true;
-  const touchers = topicTouchers[id];
-  if (!touchers || !touchers.size) return hideTests && b.isTest;
+  const touchers = new Set([...(topicTouchers[id] || []),
+                           ...(liveTopicTouchers[id] || [])]);
+  if (!touchers.size) return hideTests && b.isTest;
   return [...touchers].every(nid => isHiddenMain(nid)) || (hideTests && b.isTest);
 }
 
@@ -944,6 +949,7 @@ function applyLive(live) {
     runningIds = new Set(); liveTopicIds = new Set();
     for (const id of liveOnlyIds) { nodesDS.remove(id); delete base[id]; }
     liveOnlyIds = new Set();
+    liveTopicTouchers = {};
     for (const le of liveEdges) edgesDS.remove(le.visId);
     liveEdges = [];
     liveOnlySetSig = "";
@@ -1056,23 +1062,33 @@ function applyLive(live) {
   const setChanged = wantedKeys.join("\n") !== liveOnlySetSig;
   let newPos = null;
   let liveLayoutEdges = [];
+  // A live edge's node endpoint is either an already-identified STATIC node
+  // (running-matched — use its real id, already positioned) or a synthesized
+  // "live:"+full id; the topic endpoint is always "topic:"+name (same id
+  // scheme for static and live-only topics).
+  const liveFullToName = new Map(live.nodes.map(n => [n.full, n.name]));
+  const liveNodeElementId = full => {
+    const name = liveFullToName.get(full);
+    if (name) {
+      const staticMatch = Object.keys(base).find(
+        id => base[id].kind === "node" && !base[id].liveOnly &&
+              (base[id].name === name ||
+               (base[id].launchNames || []).includes(name)));
+      if (staticMatch) return staticMatch;
+    }
+    return "live:" + full;
+  };
+  // Rebuilt every poll, not only when the live-only set changes: the filter
+  // reads it on every restyle, and endpoints move between nodes without the
+  // set of elements changing at all.
+  liveTopicTouchers = {};
+  for (const e of live.edges || []) {
+    const tid = "topic:" + e.topic;
+    (liveTopicTouchers[tid] = liveTopicTouchers[tid] || new Set())
+      .add(liveNodeElementId(e.node));
+  }
+
   if (setChanged) {
-    // A live edge's node endpoint is either an already-identified STATIC
-    // node (running-matched — use its real id, already positioned) or a
-    // synthesized "live:"+full id; the topic endpoint is always
-    // "topic:"+name (same id scheme for static and live-only topics).
-    const liveFullToName = new Map(live.nodes.map(n => [n.full, n.name]));
-    const liveNodeElementId = full => {
-      const name = liveFullToName.get(full);
-      if (name) {
-        const staticMatch = Object.keys(base).find(
-          id => base[id].kind === "node" && !base[id].liveOnly &&
-                (base[id].name === name ||
-                 (base[id].launchNames || []).includes(name)));
-        if (staticMatch) return staticMatch;
-      }
-      return "live:" + full;
-    };
     liveLayoutEdges = (live.edges || []).map(e => {
       const nodeId = liveNodeElementId(e.node);
       const topicId = "topic:" + e.topic;
