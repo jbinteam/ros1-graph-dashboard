@@ -11,14 +11,15 @@ fields, so synthetic payloads built with OpenCV exercise them directly.
 Skipped where OpenCV/numpy are absent — they are only needed by the tap,
 never by the scanner or the server's static half.
 """
+import base64
 import struct
+
+from graph_dashboard.server import _render_compressed_image, _render_message
 
 import pytest
 
 cv2 = pytest.importorskip("cv2")
 np = pytest.importorskip("numpy")
-
-from graph_dashboard.server import _render_compressed_image, _render_message  # noqa: E402
 
 
 class _Compressed:
@@ -49,8 +50,7 @@ def test_jpeg_decodes_downscales_and_keeps_colour():
     assert out["kind"] == "image"
     assert out["source_size"].startswith("640x480")
     thumb = cv2.imdecode(
-        np.frombuffer(__import__("base64").b64decode(out["jpeg_b64"]), np.uint8),
-        cv2.IMREAD_COLOR)
+        np.frombuffer(base64.b64decode(out["jpeg_b64"]), np.uint8), cv2.IMREAD_COLOR)
     assert thumb.shape[1] == 480  # downscaled from 640
     b, g, r = thumb[10, 10]
     assert r > 200 and b < 60  # the red half survived, channels not swapped
@@ -105,7 +105,8 @@ def test_dispatch_and_failure_containment():
     assert _render_message(msg, "sensor_msgs/CompressedImage")["kind"] == "image"
 
     class Broken:
-        format = "jpeg"
+        def __init__(self):
+            self.format = "jpeg"
 
         @property
         def data(self):
