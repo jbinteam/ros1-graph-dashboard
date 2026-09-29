@@ -18,6 +18,10 @@ running — then overlays live reality on top:
   topics created only at runtime (dynamic names, nodelets) are laid out
   and connected as first-class dotted elements, so the picture never
   lies — and they can be focused and tapped like anything else.
+- **Focus paths** — click a node or topic to open its neighborhood below;
+  the upper graph keeps every upstream root and downstream path bold in
+  blue, including live connections, while unrelated branches dim. Walking
+  the focus panel updates the highlighted paths.
 - **Topic tap** — focus a topic to see its true measured Hz / bandwidth and
   the newest message, via an on-demand best-effort raw (`AnyMsg`)
   subscription that self-releases and is verified not to disturb the
@@ -28,7 +32,8 @@ running — then overlays live reality on top:
   dependencies); everything else falls back to a field tree.
 - **Noise controls** — legend chips hide test harnesses, image_transport
   variants (`/compressed`, `/theora`, …), or every idle node (active-only
-  view) with one click.
+  view) with one click. Topic type chips show just the message types you
+  select, including topics discovered only at runtime.
 - **Per-team deep links** — `/?focus=<node>&hide=pkg1,tests,activeonly`
   gives each sub-team a scoped view of their corner of the system.
 

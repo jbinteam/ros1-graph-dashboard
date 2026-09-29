@@ -19,6 +19,7 @@
 <script src="/vendor/vis-network.min.js"></script>
 <style>
   html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
   #topbar {
     padding: 8px 14px; background: #263238; color: #eceff1;
     display: flex; gap: 18px; align-items: baseline; flex-wrap: wrap;
@@ -44,8 +45,21 @@
   .chip.toggle { cursor: pointer; user-select: none; border-radius: 4px; padding: 1px 5px; }
   .chip.toggle:hover { background: #cfd8dc; }
   .chip.toggle.off { opacity: 0.4; text-decoration: line-through; }
+  #topbar, #legend { flex-shrink: 0; }
+  #typefilters {
+    display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+    flex-shrink: 0; max-height: 100px; overflow: auto;
+    padding: 6px 14px; background: #f5f7f8; font-size: 12px;
+  }
+  #typefilters button {
+    font: inherit; color: #37474f; background: #fff; border: 1px solid #b0bec5;
+  }
+  #typefilters button[aria-pressed="true"] {
+    background: #263238; color: #eceff1; border-color: #263238;
+  }
+  #msg-type-chips { display: contents; }
   #focusinfo { color: #b0bec5; margin-left: 14px; font-family: monospace; }
-  #main { height: calc(100% - 92px); display: flex; flex-direction: column; }
+  #main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   #graph { flex: 1 1 50%; min-height: 0; }
   #focuswrap {
     flex: 1 1 50%; min-height: 0; display: none; flex-direction: column;
@@ -116,7 +130,7 @@
   <span class="chip"><span class="swatch liveonly"></span>live-only (not in source scan)</span>
   <span class="chip"><span class="swatch dashed"></span>dashed = test/bench harness</span>
   <span class="chip"><span class="swatch" style="border:2.5px solid #1a237e;background:#cfd8dc"></span>dark ring = C++ node</span>
-  <span class="chip">hover = light full chain · click = focus panel</span>
+  <span class="chip">hover = light full chain · click = focus + bold paths</span>
   <span id="pkg-chips"></span>
   <span id="host-chips"></span>
   <span class="chip toggle" id="tests-toggle" title="hide/show dashed test-harness elements">hide test harnesses</span>
@@ -124,6 +138,10 @@
         title="hide/show image_transport derivative topics (.../compressed, .../compressedDepth, .../theora, .../zstd) — auto-generated plumbing, 4+ per image topic">hide transport variants</span>
   <span class="chip toggle" id="active-toggle"
         title="toggle between every declared node in the package and only the ones currently active (running, or live-only) — needs the live overlay">hide idle nodes</span>
+</div>
+<div id="typefilters" role="group" aria-label="Filter topics by message type">
+  <span>topic types:</span>
+  <span id="msg-type-chips"></span>
 </div>
 <div id="main">
   <div id="graph"></div>
@@ -170,17 +188,19 @@ function hexToRgba(hex, alpha) {
 let network = null;
 let nodesDS = null, edgesDS = null;
 let base = {};        // id -> base style/meta for every static element
-let closures = {};    // id -> {up: [...], down: [...]}
 let staticEdges = []; // scanner edges with vis ids
 let liveAvail = false;
 let runningIds = new Set();   // static node ids currently running
 let liveTopicIds = new Set(); // static topic ids with live endpoints
 let liveOnlyIds = new Set();  // ids of live-only nodes/topics, synthesized into base
-let chain = null;             // {set: Set, edges: Set} while a chain is lit
+let hoverId = null;           // preview chain when no focus panel is open
 let mainPos = {};             // current layout coordinates (static + live-only; reused by the panel)
 let focusNet = null, focusNodesDS = null;
 let focusId = null, focusEgo = null;
 let hiddenPkgs = new Set();   // package filter (main graph only)
+let selectedMsgTypes = new Set(); // empty = all topic message types
+let liveTopicTypes = new Map();   // latest live types; static types are the fallback
+let msgTypeChipsSig = null;       // preserve button focus when polling changes nothing
 let hideTests = false;        // test-harness filter (main graph only)
 let hideTransport = true;     // image_transport derivative-topic filter — noisy, hidden by default
 let showActiveOnly = false;   // all-nodes-in-package (default) vs. active-nodes-only view
@@ -297,6 +317,57 @@ function topicTooltip(id) {
 }
 
 // ------------------------------------------------------------- filters
+const UNKNOWN_MSG_TYPE = "(unknown)";
+function topicMsgTypes(id) {
+  const types = liveTopicTypes.get(id) || [];
+  const declared = (base[id] || {}).msgTypes || [];
+  return types.length ? types : declared.length ? declared : [UNKNOWN_MSG_TYPE];
+}
+
+function parseMsgTypes(value) {
+  return [...new Set((value || "").split("|").map(t => t.trim()).filter(Boolean))];
+}
+
+function renderMsgTypeChips() {
+  const counts = new Map();
+  for (const id of Object.keys(base)) {
+    if (base[id].kind !== "topic") continue;
+    for (const type of new Set(topicMsgTypes(id))) {
+      counts.set(type, (counts.get(type) || 0) + 1);
+    }
+  }
+  // Keep a selected type reachable even when its last live topic disappears.
+  for (const type of selectedMsgTypes) if (!counts.has(type)) counts.set(type, 0);
+  const entries = [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const sig = JSON.stringify([entries, [...selectedMsgTypes].sort()]);
+  if (sig === msgTypeChipsSig) return;
+  msgTypeChipsSig = sig;
+  const el = document.getElementById("msg-type-chips");
+  const focusedType = el.contains(document.activeElement) ? document.activeElement.dataset.msgType : null;
+  el.replaceChildren();
+  const addChip = (type, label, selected, onClick) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip toggle";
+    chip.dataset.msgType = type;
+    chip.textContent = label;
+    chip.setAttribute("aria-pressed", String(selected));
+    chip.addEventListener("click", () => {
+      onClick();
+      syncHideUrl(); renderFilterChips(); restyle();
+    });
+    el.appendChild(chip);
+    if (type === focusedType) chip.focus();
+  };
+  addChip("", "all types", !selectedMsgTypes.size, () => selectedMsgTypes.clear());
+  for (const [type, count] of entries) {
+    addChip(type, `${type} (${count})`, selectedMsgTypes.has(type), () => {
+      if (selectedMsgTypes.has(type)) selectedMsgTypes.delete(type);
+      else selectedMsgTypes.add(type);
+    });
+  }
+}
+
 // Package chips and the tests chip toggle visibility in the MAIN graph
 // only — the focus panel always shows the true neighborhood. A topic hides
 // only when EVERY node touching it is hidden (exclusive topics).
@@ -319,6 +390,7 @@ function isHiddenMain(id) {
   // the node that made them is itself hidden (applies to static AND
   // live-only topics alike, since isTransportVariant only looks at name).
   if (hideTransport && isTransportVariant(b.name)) return true;
+  if (selectedMsgTypes.size && !topicMsgTypes(id).some(t => selectedMsgTypes.has(t))) return true;
   const touchers = new Set([...(topicTouchers[id] || []),
                            ...(liveTopicTouchers[id] || [])]);
   if (!touchers.size) return hideTests && b.isTest;
@@ -334,6 +406,8 @@ function syncHideUrl() {
   else url.searchParams.delete("hide");
   if (hostFilter !== null) url.searchParams.set("host", hostFilter);
   else url.searchParams.delete("host");
+  if (selectedMsgTypes.size) url.searchParams.set("types", [...selectedMsgTypes].sort().join(","));
+  else url.searchParams.delete("types");
   history.replaceState(null, "", url);
 }
 
@@ -394,6 +468,7 @@ function renderFilterChips() {
     ? "hide idle nodes"
     : `hide idle nodes (${idleCount})`;
   renderHostChips();
+  renderMsgTypeChips();
 }
 
 // ------------------------------------------------------------- restyle
@@ -431,6 +506,8 @@ function fontFor(id, fcolor) {
 // Single styling pipeline: base look, then live overlay, then chain
 // dim/highlight. Every visual state change funnels through here.
 function restyle() {
+  const focused = !!(focusId && base[focusId]);
+  const chain = relatedChain(focused ? focusId : hoverId);
   const nodeUpdates = [];
   for (const id of Object.keys(base)) {
     const st = styleFor(id);
@@ -439,7 +516,10 @@ function restyle() {
       if (!chain.set.has(id)) {
         bg = "rgba(207,216,220,0.18)"; border = "rgba(176,190,197,0.4)";
         bw = 1; fcolor = "rgba(120,144,156,0.45)";
-      } else { bw = Math.max(bw, 2); fcolor = "#212121"; }
+      } else { bw = Math.max(bw, focused ? 3 : 2); fcolor = "#212121"; }
+    }
+    if (focused && id === focusId) {
+      border = "#1565c0"; bw = 4; fcolor = "#0d47a1";
     }
     nodeUpdates.push({ id, color: { background: bg, border },
                        borderWidth: bw, hidden: isHiddenMain(id),
@@ -451,15 +531,13 @@ function restyle() {
   // no separate pass needed.
   nodesDS.update(nodeUpdates);
   const edgeUpdates = [];
-  // liveEdges (dashed, undeclared-in-source pub/sub links) get the same
-  // hide-filter and chain-dim treatment as static edges — they're just
-  // never eligible for the "in active chain" highlight (chain.edges only
-  // ever contains static visIds, since chains walk the declared closures).
+  // Declared and live pub/sub links share the same path emphasis. Keep
+  // live links dashed so their source remains visible while highlighted.
   for (const e of [...staticEdges, ...liveEdges]) {
     const hidden = isHiddenMain(e.source) || isHiddenMain(e.target);
     const live = liveEdges.includes(e);
     if (chain && chain.edges.has(e.visId)) {
-      edgeUpdates.push({ id: e.visId, hidden, color: { color: "#1565c0" }, width: 3 });
+      edgeUpdates.push({ id: e.visId, hidden, color: { color: "#1565c0" }, width: focused ? 4 : 3 });
     } else if (chain) {
       edgeUpdates.push({ id: e.visId, hidden,
                          color: { color: "rgba(120,144,156,0.12)" }, width: 1 });
@@ -577,11 +655,11 @@ async function focusOn(id) {
         interaction: { hover: true, tooltipDelay: 120 },
       });
     // Walking the impact chain: clicking inside the panel re-focuses.
-    focusNet.on("click", ev => { if (ev.nodes.length) focusOn(ev.nodes[0]); });
+    focusNet.on("click", ev => { if (ev.nodes.length) return focusOn(ev.nodes[0]); });
   } else {
     focusNet.setData({ nodes: focusNodesDS, edges: focusEdgesDS });
   }
-  restyleFocus();
+  restyle();
   requestAnimationFrame(() => {
     network.redraw(); network.fit();
     network.moveTo({ scale: network.getScale() * 0.96 });
@@ -912,6 +990,7 @@ function closeFocus() {
   stopTap();
   focusId = null; focusEgo = null; focusNodesDS = null;
   document.getElementById("focuswrap").classList.remove("open");
+  restyle();
   requestAnimationFrame(() => {
     network.redraw(); network.fit();
     network.moveTo({ scale: network.getScale() * 0.96 });
@@ -920,28 +999,50 @@ function closeFocus() {
 
 // -------------------------------------------------------- chain logic
 // Chain of an element = itself + transitive ancestors + descendants over
-// the REAL directed graph (closures computed server-side, cycle-safe).
+// declared AND current live connections. Walk each direction separately
+// so sibling branches are not mistaken for paths through the focus.
 // An edge is on the chain iff it feeds the ancestry (target in up+self)
 // or continues the descent (source in down+self).
-function highlightChain(id) {
-  const c = closures[id] || { up: [], down: [] };
-  const up = new Set(c.up), down = new Set(c.down);
-  const set = new Set([id, ...c.up, ...c.down]);
-  const edges = new Set();
-  for (const e of staticEdges) {
-    if (up.has(e.target) || e.target === id || down.has(e.source) || e.source === id) {
-      if (set.has(e.source) && set.has(e.target)) edges.add(e.visId);
-    }
+function relatedChain(id) {
+  if (!id || !base[id]) return null;
+  const graphEdges = [...staticEdges, ...liveEdges].filter(e => base[e.source] && base[e.target]);
+  const inputs = new Map(), outputs = new Map();
+  for (const e of graphEdges) {
+    if (!inputs.has(e.target)) inputs.set(e.target, []);
+    if (!outputs.has(e.source)) outputs.set(e.source, []);
+    inputs.get(e.target).push(e.source);
+    outputs.get(e.source).push(e.target);
   }
-  chain = { set, edges };
+  const walk = adjacency => {
+    const reached = new Set([id]), todo = [id];
+    while (todo.length) {
+      for (const next of adjacency.get(todo.pop()) || []) {
+        if (!reached.has(next)) { reached.add(next); todo.push(next); }
+      }
+    }
+    return reached;
+  };
+  const up = walk(inputs), down = walk(outputs);
+  const set = new Set([...up, ...down]);
+  const edges = new Set();
+  for (const e of graphEdges) {
+    if (up.has(e.target) || down.has(e.source)) edges.add(e.visId);
+  }
+  return { set, edges };
+}
+
+function highlightChain(id) {
+  hoverId = id;
   restyle();
 }
 
-function clearChain() { chain = null; restyle(); }
+function clearChain() { hoverId = null; restyle(); }
 
 // ---------------------------------------------------------- live poll
 function applyLive(live) {
   liveAvail = !!live.available;
+  liveTopicTypes = new Map((liveAvail ? live.topics : []).map(
+    t => ["topic:" + t.name, [...new Set((t.types || []).filter(Boolean))]]));
   const chip = document.getElementById("livechip");
   if (!liveAvail) {
     chip.textContent = "live: unavailable — " + (live.reason || "?");
@@ -1061,7 +1162,6 @@ function applyLive(live) {
   const wantedKeys = [...wanted.keys()].sort();
   const setChanged = wantedKeys.join("\n") !== liveOnlySetSig;
   let newPos = null;
-  let liveLayoutEdges = [];
   // A live edge's node endpoint is either an already-identified STATIC node
   // (running-matched — use its real id, already positioned) or a synthesized
   // "live:"+full id; the topic endpoint is always "topic:"+name (same id
@@ -1088,13 +1188,13 @@ function applyLive(live) {
       .add(liveNodeElementId(e.node));
   }
 
+  const liveLayoutEdges = (live.edges || []).map(e => {
+    const nodeId = liveNodeElementId(e.node);
+    const topicId = "topic:" + e.topic;
+    return e.kind === "pub" ? { source: nodeId, target: topicId }
+                            : { source: topicId, target: nodeId };
+  });
   if (setChanged) {
-    liveLayoutEdges = (live.edges || []).map(e => {
-      const nodeId = liveNodeElementId(e.node);
-      const topicId = "topic:" + e.topic;
-      return e.kind === "pub" ? { source: nodeId, target: topicId }
-                              : { source: topicId, target: nodeId };
-    });
     newPos = computeLayout(
       [...staticElementIds, ...wantedKeys],
       [...staticLayoutEdges, ...liveLayoutEdges]
@@ -1124,25 +1224,27 @@ function applyLive(live) {
     liveOnlySetSig = wantedKeys.join("\n");
     mainPos = newPos;
     nodesDS.update(Object.keys(newPos).map(id => ({ id, x: newPos[id].x, y: newPos[id].y })));
+  }
 
-    // Draw the live pub/sub edges on the main graph too (dashed grey —
-    // never in the static edge list): a live-only element's position
-    // shouldn't just be "coincidentally near" its neighbor, it should be
-    // visibly connected, so discovering it never requires a click.
-    for (const le of liveEdges) edgesDS.remove(le.visId);
-    liveEdges = [];
-    const seen = new Set();
-    for (const e of liveLayoutEdges) {
-      if (!(e.source in base) || !(e.target in base)) continue;
-      const visId = "live-e-" + e.source + "->" + e.target;
-      if (seen.has(visId)) continue;
-      seen.add(visId);
-      liveEdges.push({ source: e.source, target: e.target, visId });
+  // Keep routes current even when endpoints change without adding nodes.
+  // Reuse unchanged edges and positions; declared links already have a line.
+  const declaredLinks = new Set(staticEdges.map(e => e.source + "->" + e.target));
+  const previousEdges = new Set(liveEdges.map(e => e.visId));
+  const nextEdges = new Map();
+  for (const e of liveLayoutEdges) {
+    if (!(e.source in base) || !(e.target in base)) continue;
+    const link = e.source + "->" + e.target;
+    const visId = "live-e-" + link;
+    if (declaredLinks.has(link) || nextEdges.has(visId)) continue;
+    nextEdges.set(visId, { ...e, visId });
+    if (!previousEdges.has(visId)) {
       edgesDS.add({ id: visId, from: e.source, to: e.target, arrows: "to",
                     color: { color: "#90a4ae" }, dashes: [3, 3],
                     title: "live pub/sub (undeclared in source)" });
     }
   }
+  for (const e of liveEdges) if (!nextEdges.has(e.visId)) edgesDS.remove(e.visId);
+  liveEdges = [...nextEdges.values()];
   chip.textContent = "live: " + live.nodes.length + " running";
   chip.className = "on";
   updateSummaryLine();
@@ -1247,7 +1349,6 @@ function computeLayout(elementIds, edges) {
 async function load() {
   const res = await fetch("/api/graph");
   const g = await res.json();
-  closures = g.closures || {};
 
   const packages = [...new Set(g.nodes.map(n => n.package))].sort();
   const colorOf = {};
@@ -1322,6 +1423,7 @@ async function load() {
   for (const t of g.topics) {
     const tid = "topic:" + t.name;
     base[tid] = { kind: "topic", name: t.name, bgHex: "#ffffff", bg: "#ffffff",
+                  msgTypes: parseMsgTypes(t.msg_type),
                   border: t.dynamic ? "#e53935" : "#455a64", pkg: null,
                   isTest: [...(topicTouchers[tid] || [])].length > 0 &&
                           [...(topicTouchers[tid] || [])].every(
@@ -1370,6 +1472,8 @@ async function load() {
   // silently dropped on load.
   const hostParam = new URLSearchParams(location.search).get("host");
   if (hostParam) hostFilter = hostParam;
+  const typesParam = new URLSearchParams(location.search).get("types");
+  selectedMsgTypes = new Set((typesParam || "").split(",").map(t => t.trim()).filter(Boolean));
   renderFilterChips();
   for (const vn of visNodes) vn.hidden = isHiddenMain(vn.id);
   for (const ve of visEdges) ve.hidden = isHiddenMain(ve.from) || isHiddenMain(ve.to);
@@ -1406,7 +1510,7 @@ async function load() {
 
   // Deep links (and the headless-verification path): /?highlight=<name>
   // runs the exact hover code path, /?focus=<name> the exact click path.
-  // They compose; with both present, each just applies to its own layer.
+  // An open focus panel pins its chain above any hover/deep-link preview.
   const resolve = want => want && (
     Object.keys(base).find(id => base[id].name === want) ||
     Object.keys(base).find(id => base[id].kind === "topic" && base[id].name === "/" + want) ||
@@ -1415,7 +1519,7 @@ async function load() {
   const hl = resolve(params.get("highlight"));
   if (hl) highlightChain(hl);
   const fc = resolve(params.get("focus"));
-  if (fc) focusOn(fc);
+  if (fc) await focusOn(fc);
 }
 load().catch(err => {
   document.getElementById("summary").textContent = "failed to load graph: " + err;

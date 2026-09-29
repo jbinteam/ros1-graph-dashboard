@@ -15,9 +15,11 @@ an actual multi-machine sample caught it, hence this harness.
 Skipped where Node is unavailable; the dashboard itself never needs it.
 """
 import json
+from copy import deepcopy
 from pathlib import Path
 import shutil
 import subprocess
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -25,12 +27,16 @@ _HARNESS = Path(__file__).parent / "frontend_harness.js"
 _PAGE = Path(__file__).parents[1] / "graph_dashboard" / "web" / "index.html"
 
 
-def _run(payload, host_filter=None):
+def _run(payload, host_filter=None, graph=None, url="", click_types=(), next_live=None,
+         actions=(), egos=None):
     node = shutil.which("node") or shutil.which("nodejs")
     if node is None:
         pytest.skip("node not installed — frontend harness cannot run")
     body = dict(payload)
-    body["_host_filter"] = host_filter
+    if host_filter is not None:
+        body["_host_filter"] = host_filter
+    body.update(_graph=graph, _url=url, _click_types=click_types, _next_live=next_live)
+    body.update(_actions=actions, _egos=egos)
     out = subprocess.run(
         [node, str(_HARNESS)],
         input=json.dumps(body), capture_output=True, text=True, timeout=60,
@@ -117,3 +123,271 @@ def test_unknown_host_filter_hides_every_node():
 def test_live_unavailable_clears_the_machine_list():
     out = _run({"available": False, "reason": "rosgraph not importable"})
     assert out["machines"] == [] and out["elements"] == []
+
+
+_STATIC_GRAPH = {
+    "nodes": [{"id": "node:vision/camera", "node_name": "jetson_camera",
+               "package": "vision", "source_file": "camera.py"}],
+    "topics": [
+        {"name": "/jetson/image", "msg_type": "sensor_msgs/Image | sensor_msgs/CompressedImage"},
+        {"name": "/idle/image", "msg_type": "sensor_msgs/Image"},
+        {"name": "/unknown", "msg_type": ""},
+    ],
+    "edges": [
+        {"source": "node:vision/camera", "target": "topic:" + topic, "kind": "pub"}
+        for topic in ("/jetson/image", "/idle/image", "/unknown")
+    ],
+    "summary": {"node_count": 1, "topic_count": 3, "edge_count": 3,
+                "dynamic_topic_count": 0, "files_scanned": 1},
+}
+_NO_LIVE = {"available": False, "reason": "no master"}
+
+
+def test_type_buttons_include_static_live_and_unknown_topics():
+    out = _run(_TWO_MACHINES, graph=_STATIC_GRAPH)
+    buttons = {b["type"]: b for b in out["type_buttons"]}
+    assert buttons[""]["pressed"] == "true"
+    assert buttons["sensor_msgs/Image"]["label"] == "sensor_msgs/Image (2)"
+    assert buttons["sensor_msgs/LaserScan"]["label"] == "sensor_msgs/LaserScan (1)"
+    assert buttons["(unknown)"]["label"] == "(unknown) (1)"
+    # The master knows the actual type of a running, statically declared topic.
+    assert "sensor_msgs/CompressedImage" not in buttons
+
+
+def test_type_click_filters_topics_and_edges_and_updates_url():
+    out = _run(_TWO_MACHINES, click_types=["sensor_msgs/Image"])
+    assert "topic:/jetson/image" in out["visible"]
+    assert {"topic:/nuc/scan", "topic:/diagnostics"} <= set(out["hidden"])
+    assert "live:/nuc_lidar" in out["visible"]
+    assert all(e["hidden"] for e in out["edges"] if e["to"] == "topic:/nuc/scan")
+    assert parse_qs(urlparse(out["url"]).query)["types"] == ["sensor_msgs/Image"]
+
+
+def test_multiple_type_selections_match_any_selected_type():
+    out = _run(_TWO_MACHINES, click_types=["sensor_msgs/Image", "sensor_msgs/LaserScan"])
+    assert {"topic:/jetson/image", "topic:/nuc/scan"} <= set(out["visible"])
+    assert "topic:/diagnostics" in out["hidden"]
+    assert {b["type"] for b in out["type_buttons"] if b["pressed"] == "true"} == {
+        "sensor_msgs/Image", "sensor_msgs/LaserScan"}
+
+
+@pytest.mark.parametrize("clicks", [
+    ["sensor_msgs/Image", "sensor_msgs/Image"],
+    ["sensor_msgs/Image", "sensor_msgs/LaserScan", ""],
+])
+def test_all_types_reset_restores_topics_and_removes_url_parameter(clicks):
+    out = _run(_TWO_MACHINES, click_types=clicks)
+    assert out["hidden"] == []
+    assert "types" not in parse_qs(urlparse(out["url"]).query)
+    assert out["type_buttons"][0]["pressed"] == "true"
+
+
+def test_static_multi_type_topic_matches_without_ros():
+    out = _run(_NO_LIVE, graph=_STATIC_GRAPH, url="?types=sensor_msgs%2FCompressedImage")
+    assert "topic:/jetson/image" in out["visible"]
+    assert {"topic:/idle/image", "topic:/unknown"} <= set(out["hidden"])
+    assert "node:vision/camera" in out["visible"]
+
+
+def test_unknown_type_is_selectable():
+    out = _run(_NO_LIVE, graph=_STATIC_GRAPH, click_types=["(unknown)"])
+    assert "topic:/unknown" in out["visible"]
+    assert {"topic:/idle/image", "topic:/jetson/image"} <= set(out["hidden"])
+
+
+def test_message_types_compose_with_host_and_package_filters():
+    out = _run(_TWO_MACHINES, url="?host=10.0.0.9&types=sensor_msgs/Image")
+    assert {"topic:/jetson/image", "topic:/nuc/scan", "topic:/diagnostics"} <= set(out["hidden"])
+    assert "live:/nuc_lidar" in out["visible"]
+    out = _run(_NO_LIVE, graph=_STATIC_GRAPH, url="?hide=vision", click_types=["sensor_msgs/Image"])
+    assert set(out["hidden"]) == set(out["elements"])
+    assert parse_qs(urlparse(out["url"]).query)["hide"] == ["vision"]
+
+
+def test_type_changes_on_existing_live_topics_refresh_filter():
+    changed = deepcopy(_TWO_MACHINES)
+    changed["topics"][0]["types"] = ["sensor_msgs/LaserScan"]
+    out = _run(_TWO_MACHINES, click_types=["sensor_msgs/Image"], next_live=changed)
+    assert "topic:/jetson/image" in out["hidden"]
+    assert any(b["label"] == "sensor_msgs/Image (0)" and b["pressed"] == "true"
+               for b in out["type_buttons"])
+
+
+def test_live_unavailable_restores_declared_message_types():
+    out = _run(_TWO_MACHINES, graph=_STATIC_GRAPH,
+               url="?types=sensor_msgs/CompressedImage", next_live=_NO_LIVE)
+    assert "topic:/jetson/image" in out["visible"]
+    assert "topic:/idle/image" in out["hidden"]
+    assert any(b["label"] == "sensor_msgs/CompressedImage (1)" for b in out["type_buttons"])
+
+
+def test_selected_type_remains_clearable_when_its_live_topic_disappears():
+    changed = deepcopy(_TWO_MACHINES)
+    changed["topics"] = [t for t in changed["topics"] if t["name"] != "/nuc/scan"]
+    changed["edges"] = [e for e in changed["edges"] if e["topic"] != "/nuc/scan"]
+    out = _run(_TWO_MACHINES, click_types=["sensor_msgs/LaserScan"], next_live=changed)
+    assert "topic:/nuc/scan" not in out["elements"]
+    assert "topic:/jetson/image" in out["hidden"]
+    assert any(b["label"] == "sensor_msgs/LaserScan (0)" and b["pressed"] == "true"
+               for b in out["type_buttons"])
+
+
+_CAMERA_ID = "node:vision/camera"
+_PATH_FOCUS = "node:demo/focus"
+_PATH_LINKS = [
+    ("node:demo/root_a", "topic:/first", "pub"),
+    ("topic:/first", "node:demo/relay", "sub"),
+    ("node:demo/relay", "topic:/input", "pub"),
+    ("topic:/input", _PATH_FOCUS, "sub"),
+    ("node:demo/root_b", "topic:/second", "pub"),
+    ("topic:/second", _PATH_FOCUS, "sub"),
+    (_PATH_FOCUS, "topic:/output", "pub"),
+    ("topic:/output", "node:demo/sink", "sub"),
+    ("node:demo/root_a", "topic:/side", "pub"),
+    ("topic:/side", "node:demo/sibling", "sub"),
+]
+_PATH_GRAPH = {
+    "nodes": [{"id": "node:demo/" + name, "node_name": name,
+               "package": "demo", "source_file": name + ".py"}
+              for name in ("root_a", "root_b", "relay", "focus", "sink", "sibling", "unused")],
+    "topics": [{"name": "/" + name, "msg_type": "std_msgs/String"}
+               for name in ("first", "input", "second", "output", "side")],
+    "edges": [{"source": source, "target": target, "kind": kind}
+              for source, target, kind in _PATH_LINKS],
+    "summary": {"node_count": 7, "topic_count": 5, "edge_count": 10,
+                "dynamic_topic_count": 0, "files_scanned": 7},
+}
+
+
+def _bold_paths(out):
+    return {(e["from"], e["to"]) for e in out["edges"]
+            if e["width"] >= 3 and e["color"] == "#1565c0"}
+
+
+def test_focus_bolds_all_upstream_roots_and_downstream_paths_without_moving_nodes():
+    before = _run(_NO_LIVE, graph=_PATH_GRAPH)
+    out = _run(_NO_LIVE, graph=_PATH_GRAPH, actions=[{"kind": "focus", "id": _PATH_FOCUS}])
+    assert _bold_paths(out) == {(source, target) for source, target, _ in _PATH_LINKS[:8]}
+    for name in ("root_a", "root_b", "relay", "focus", "sink"):
+        assert out["node_styles"]["node:demo/" + name]["border_width"] >= 3
+    assert out["node_styles"][_PATH_FOCUS]["border_color"] == "#1565c0"
+    assert out["node_styles"]["node:demo/sibling"]["border_width"] == 1
+    assert out["node_styles"]["node:demo/unused"]["border_width"] == 1
+    assert out["hidden"] == []
+    assert out["rendered_positions"] == before["rendered_positions"]
+
+
+@pytest.mark.parametrize("blur", [False, True])
+def test_focus_paths_stay_bold_when_hovering_elsewhere_or_leaving_the_upper_graph(blur):
+    actions = [{"kind": "focus", "id": _PATH_FOCUS},
+               {"kind": "hover", "id": "node:demo/sibling"}]
+    if blur:
+        actions.append({"kind": "blur", "id": "node:demo/sibling"})
+    out = _run(_NO_LIVE, graph=_PATH_GRAPH, actions=actions)
+    assert _bold_paths(out) == {(source, target) for source, target, _ in _PATH_LINKS[:8]}
+
+
+def test_closing_focus_restores_normal_graph_styling():
+    out = _run(_NO_LIVE, graph=_PATH_GRAPH, actions=[
+        {"kind": "focus", "id": _PATH_FOCUS},
+        {"kind": "close"},
+    ])
+    assert not _bold_paths(out)
+    assert all(e["width"] == 1 and e["color"] == "#78909c" for e in out["edges"])
+    assert all(st["border_width"] == 1 for st in out["node_styles"].values())
+
+
+def test_focus_paths_include_feedback_cycles():
+    graph = deepcopy(_PATH_GRAPH)
+    graph["topics"].append({"name": "/feedback", "msg_type": "std_msgs/String"})
+    feedback = [("node:demo/sink", "topic:/feedback"), ("topic:/feedback", _PATH_FOCUS)]
+    graph["edges"].extend({"source": source, "target": target, "kind": kind}
+                          for (source, target), kind in zip(feedback, ("pub", "sub")))
+    graph["summary"].update(topic_count=6, edge_count=12)
+    out = _run(_NO_LIVE, graph=graph, actions=[{"kind": "focus", "id": _PATH_FOCUS}])
+    expected = {(source, target) for source, target, _ in _PATH_LINKS[:8]} | set(feedback)
+    assert _bold_paths(out) == expected
+
+
+def test_walking_the_focus_panel_updates_the_bold_paths():
+    target = "topic:/idle/image"
+    out = _run(_NO_LIVE, graph=_STATIC_GRAPH, egos={
+        _CAMERA_ID: {"center": _CAMERA_ID, "levels": {_CAMERA_ID: 0, target: 1}, "dual": []},
+    }, actions=[
+        {"kind": "focus", "id": _CAMERA_ID},
+        {"kind": "focus-click", "id": target},
+    ])
+    assert out["focus_id"] == target
+    assert _bold_paths(out) == {(_CAMERA_ID, target)}
+
+
+def test_focus_paths_extend_from_static_nodes_through_live_only_connections():
+    out = _run(_TWO_MACHINES, graph=_STATIC_GRAPH,
+               actions=[{"kind": "focus", "id": _CAMERA_ID}])
+    assert _bold_paths(out) == {
+        (_CAMERA_ID, "topic:/jetson/image"), (_CAMERA_ID, "topic:/idle/image"),
+        (_CAMERA_ID, "topic:/unknown"), (_CAMERA_ID, "topic:/diagnostics"),
+        ("topic:/jetson/image", "live:/jetson_detector"),
+    }
+    assert len({(e["from"], e["to"]) for e in out["edges"]}) == len(out["edges"])
+    edge = next(e for e in out["edges"] if e["to"] == "live:/jetson_detector")
+    assert edge["dashes"] == [3, 3]
+    assert out["node_styles"]["live:/jetson_detector"]["border_width"] >= 3
+    assert out["node_styles"]["live:/nuc_lidar"]["border_width"] == 1
+
+
+def test_focus_paths_follow_live_endpoint_changes_without_rearranging_existing_nodes():
+    changed = deepcopy(_TWO_MACHINES)
+    changed["edges"][1]["topic"] = "/diagnostics"
+    changed["topics"][0]["sub_count"] = 0
+    changed["topics"][2]["sub_count"] = 1
+    focus = [{"kind": "focus", "id": "topic:/jetson/image"}]
+    before = _run(_TWO_MACHINES, actions=focus)
+    out = _run(_TWO_MACHINES, actions=focus + [{"kind": "live", "live": changed}])
+    pairs = {(e["from"], e["to"]) for e in out["edges"]}
+    assert ("topic:/jetson/image", "live:/jetson_detector") not in pairs
+    assert ("topic:/diagnostics", "live:/jetson_detector") in pairs
+    assert _bold_paths(out) == {("live:/jetson_camera", "topic:/jetson/image")}
+    assert out["node_styles"]["live:/jetson_detector"]["border_width"] == 1
+    assert out["elements"] == before["elements"]
+    assert out["rendered_positions"] == before["rendered_positions"]
+
+
+def test_declared_focus_paths_remain_bold_when_live_discovery_becomes_unavailable():
+    out = _run(_TWO_MACHINES, graph=_STATIC_GRAPH, actions=[
+        {"kind": "focus", "id": _CAMERA_ID},
+        {"kind": "live", "live": _NO_LIVE},
+    ])
+    assert _bold_paths(out) == {(_CAMERA_ID, "topic:" + name)
+                                for name in ("/jetson/image", "/idle/image", "/unknown")}
+    assert "live:/jetson_detector" not in out["elements"]
+
+
+def test_hover_still_previews_paths_when_the_focus_panel_is_closed():
+    out = _run(_NO_LIVE, graph=_PATH_GRAPH, actions=[{"kind": "hover", "id": _PATH_FOCUS}])
+    assert out["focus_id"] is None
+    assert _bold_paths(out) == {(source, target) for source, target, _ in _PATH_LINKS[:8]}
+    cleared = _run(_NO_LIVE, graph=_PATH_GRAPH, actions=[
+        {"kind": "hover", "id": _PATH_FOCUS}, {"kind": "blur", "id": _PATH_FOCUS},
+    ])
+    assert not _bold_paths(cleared)
+
+
+def test_focus_deep_link_bolds_its_paths_on_load():
+    out = _run(_NO_LIVE, graph=_PATH_GRAPH, url="?focus=focus")
+    assert out["focus_id"] == _PATH_FOCUS
+    assert _bold_paths(out) == {(source, target) for source, target, _ in _PATH_LINKS[:8]}
+
+
+def test_live_connections_of_launch_renamed_nodes_use_the_static_node_in_focus_paths():
+    graph = deepcopy(_STATIC_GRAPH)
+    graph["nodes"][0]["launch_names"] = ["/robot/camera_renamed"]
+    live = deepcopy(_TWO_MACHINES)
+    live["nodes"][0].update(name="camera_renamed", full="/robot/camera_renamed")
+    for edge in live["edges"]:
+        if edge["node"] == "/jetson_camera":
+            edge["node"] = "/robot/camera_renamed"
+    out = _run(live, graph=graph, actions=[{"kind": "focus", "id": _CAMERA_ID}])
+    assert "live:/robot/camera_renamed" not in out["elements"]
+    assert (_CAMERA_ID, "topic:/diagnostics") in _bold_paths(out)
+    assert ("topic:/jetson/image", "live:/jetson_detector") in _bold_paths(out)

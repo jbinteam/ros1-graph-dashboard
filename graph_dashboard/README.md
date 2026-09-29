@@ -50,9 +50,14 @@ network.
 
 - **Hover** a node or topic: lights its full transitive chain (everything
   that can affect it or be affected by it, cycles included), dims the rest.
+  When the focus panel is open, the upper graph keeps the focused element's
+  paths highlighted instead.
 - **Click** a node or topic: splits the page; the bottom **focus panel**
   shows the direct neighborhood — for a node, its topics (±1) and the
   before/after nodes (±2); for a topic, its publishers and subscribers.
+  The upper graph displays every upstream root and downstream path in bold
+  blue, including declared and live connections, while unrelated branches
+  dim. This emphasis follows the focus and clears when the panel closes.
   Click inside the panel to walk the chain hop by hop; `Esc` or ✕ closes.
   Focusing a **topic** also opens a live tap strip (measured Hz, bandwidth,
   latest message as thumbnail or field tree) — the server subscribes to
@@ -79,6 +84,14 @@ network.
   "hide test harnesses" hides the dashed bench/test elements. Filters apply
   to the main graph only — the focus panel always shows the true
   neighborhood, even filtered-out elements, so the ego view never lies.
+- **Topic type chips** filter topics by message type. Click one or several
+  types to show topics matching any selected type; **all types** resets the
+  selection. Counts include static and live-only topics. Running topics use
+  the type reported by the ROS master; otherwise the declared source type
+  is used, with **(unknown)** for topics without type information. The
+  filter hides topics and their edges in the main graph; nodes remain
+  visible, and the focus panel still shows the full neighborhood. It
+  composes with package, host, test, transport, and active-only filters.
 - **Tooltips** carry the details: nodes list their declared pubs/subs with
   message types and best-effort static queue info; topics list publishers
   and subscribers. The bracketed tag shows what the scanner can prove from
@@ -93,10 +106,13 @@ network.
 | `?focus=<name>` | open the focus panel on load | `/?focus=/estop` |
 | `?hide=<list>` | comma-separated packages and/or `tests` to hide | `/?hide=sim,tests` |
 | `?host=<ip>` | show only nodes running on that machine | `/?host=192.168.1.22` |
+| `?types=<list>` | show topics matching any comma-separated message type | `/?types=sensor_msgs/Image,sensor_msgs/PointCloud2` |
 
 Names accept a node name, a topic name (with or without the leading `/`),
 or a full element id (`node:<pkg>/<name>`, `topic:/<name>`). Parameters
-compose: `/?focus=camera_driver&hide=sim,tests`.
+compose: `/?focus=camera_driver&hide=sim,tests&types=sensor_msgs/Image`.
+Topic type selections update the URL automatically, so shared links and
+reloads retain the filter.
 
 ## API
 
@@ -179,8 +195,12 @@ compose: `/?focus=camera_driver&hide=sim,tests`.
   subscribe downstream and publish upstream), so back edges are found by
   DFS first and excluded from layering — they simply draw right-to-left,
   as rqt_graph does. Column order minimizes crossings (barycenter pass).
-- **Hover chain:** true transitive closure over the real directed graph,
-  cycles included — harness feedback paths deliberately light up.
+- **Hover/focus paths:** true transitive closure over the declared and
+  current live directed graph, cycles included — harness feedback paths
+  deliberately light up. Each direction is traversed separately so sibling
+  branches stay outside the focused paths. Live endpoint changes refresh
+  paths without rearranging existing nodes; launch-renamed nodes retain
+  their static identity.
 - **Ego placement:** BFS distance from the focused element, clamped as
   above. An element reachable both upstream and downstream appears exactly
   once: the side with the smaller |distance| wins, ties go upstream (the
@@ -311,8 +331,8 @@ live-only-element HTTP tests, the per-node host lookup, and the tap's
 image renderers (the renderer tests skip themselves where OpenCV is
 absent — it is needed only by the tap). `test/frontend_harness.js` runs
 the real page script under Node against a synthetic `/api/live` sample, so
-the graph's filter rules are tested rather than eyeballed; those tests skip
-where Node is absent. Inside a built workspace,
+the graph's filters and focus-path highlighting are tested rather than
+eyeballed; those tests skip where Node is absent. Inside a built workspace,
 `catkin_make run_tests --pkg graph_dashboard` runs the same suite —
 `CMakeLists.txt` registers pytest through `catkin_run_tests_target` rather
 than `catkin_add_nosetests`, because these tests use pytest fixtures
