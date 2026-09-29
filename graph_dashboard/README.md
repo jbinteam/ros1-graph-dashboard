@@ -46,6 +46,29 @@ page serves source paths, the full topic list, and live message content
 including camera frames, which is fine on loopback and less fine on a lab
 network.
 
+### Updating an existing installation
+
+For the message-type filter and bold focus paths, a Git checkout linked
+into a catkin workspace using `devel/setup.bash` needs only
+`git pull --ff-only` and a browser hard refresh (**Ctrl+Shift+R**). The
+server reads the dashboard page from source on each request, so this
+update needs no rebuild or dashboard restart and adds no dependencies.
+
+If you used `install.sh`, pulling the repo leaves the extracted package
+unchanged. Stop the dashboard, copy the updated `install.sh` into your
+workspace root, run `bash install.sh --force`, source `devel/setup.bash`,
+restart `rosrun graph_dashboard serve` with your previous options, and
+hard-refresh the browser. The installer backs up the old package,
+rebuilds the replacement, and runs its self-test.
+
+If you copied the package manually, copy the updated `graph_dashboard/`
+into your workspace again. If you use a catkin `install/` directory,
+rerun your usual `catkin_make install` step to refresh the installed web
+assets, source `install/setup.bash`, and restart the dashboard.
+
+Full commands are in the
+[repository update guide](https://github.com/jbinteam/ros1-graph-dashboard#updating-an-existing-installation).
+
 ## Using the page
 
 - **Hover** a node or topic: lights its full transitive chain (everything

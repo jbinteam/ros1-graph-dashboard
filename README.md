@@ -60,6 +60,50 @@ source devel/setup.bash
 rosrun graph_dashboard serve   # run from the workspace root
 ```
 
+## Updating an existing installation
+
+The message-type filter and bold focus paths are dashboard page changes;
+they add no dependencies. Update the package that your dashboard actually
+uses, then hard-refresh the page with **Ctrl+Shift+R**.
+
+**Git checkout linked into a catkin workspace using `devel/setup.bash`:**
+
+```bash
+cd ~/my_catkin_ws/src/ros1-graph-dashboard  # use your existing clone's path
+git pull --ff-only
+```
+
+For this update, a browser hard refresh is enough: the dashboard reads the
+page from source on each request. No rebuild or dashboard restart is
+needed. If you copied `graph_dashboard/` into `src/` instead of linking it,
+copy the updated package there again before refreshing.
+
+**Installed using the self-contained `install.sh`:** pulling the Git repo
+does not update the separate package extracted into your workspace. Stop
+the dashboard with **Ctrl+C** in its terminal, then run:
+
+```bash
+# From your existing Git clone:
+git pull --ff-only
+cp install.sh ~/my_catkin_ws/install.sh
+
+cd ~/my_catkin_ws
+source /opt/ros/noetic/setup.bash
+bash install.sh --force
+source devel/setup.bash
+rosrun graph_dashboard serve
+```
+
+The installer keeps the previous package in a timestamped backup, replaces
+the extracted copy, rebuilds this package, and runs its self-test. Reuse
+any `--src`, `--host`, or `--port` options from your previous dashboard
+command, then hard-refresh the browser.
+
+If you run from a catkin **`install/` directory** rather than `devel/`,
+rerun your usual `catkin_make install` step after updating the source so
+the installed web assets are refreshed. Source `install/setup.bash`,
+restart the dashboard, and hard-refresh its page.
+
 ## Compatibility
 
 ROS 1 Noetic only. Python packages get full static coverage; C++ coverage
