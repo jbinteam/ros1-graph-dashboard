@@ -48,8 +48,9 @@ network.
 
 ### Updating an existing installation
 
-For the message-type filter and bold focus paths, a Git checkout linked
-into a catkin workspace using `devel/setup.bash` needs only
+For the message-type filter, persistent focus paths, and saved focus-panel
+arrangements, a Git checkout linked into a catkin workspace using
+`devel/setup.bash` needs only
 `git pull --ff-only` and a browser hard refresh (**Ctrl+Shift+R**). The
 server reads the dashboard page from source on each request, so this
 update needs no rebuild or dashboard restart and adds no dependencies.
