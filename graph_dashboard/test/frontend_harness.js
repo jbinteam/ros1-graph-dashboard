@@ -41,11 +41,14 @@ globalThis.__harness = {
   }])); },
   focusCenter() { return focusId; },
   positions() { return network.getPositions(); },
+  focusPositions() { return focusNodesDS ? focusNet.getPositions() : {}; },
   async act(action) {
     if (action.kind === "focus") {
       await focusOn(action.id);
     } else if (action.kind === "focus-click") {
       await Promise.all(focusNet.emit("click", {nodes: action.id ? [action.id] : []}));
+    } else if (action.kind === "drag") {
+      network.moveNode(action.id, action.x, action.y);
     } else if (action.kind === "hover") {
       network.emit("hoverNode", {node: action.id});
     } else if (action.kind === "blur") {
@@ -133,8 +136,12 @@ global.vis = {
     emit(event, data) { return [...(this.handlers[event] || [])].map(fn => fn(data)); }
     once() {} fit() {} moveTo() {} redraw() {} setOptions() {} destroy() {}
     getScale() { return 1; }
-    getPositions() {
-      return Object.fromEntries([...this.data.nodes.items.values()].map(n =>
+    moveNode(id, x, y) {
+      this.data.nodes.update({id, x, y});
+    }
+    getPositions(ids) {
+      const nodes = [...this.data.nodes.items.values()].filter(n => !ids || ids.includes(n.id));
+      return Object.fromEntries(nodes.map(n =>
         [n.id, {x: n.x || 0, y: n.y || 0}]));
     }
   },
@@ -194,6 +201,7 @@ async function run() {
     node_styles: H.nodeStyles(),
     focus_id: H.focusCenter(),
     rendered_positions: H.positions(),
+    focus_positions: H.focusPositions(),
     type_buttons: els['msg-type-chips'].children.map(c => ({
       type: c.dataset.msgType, label: c.textContent, pressed: c.getAttribute('aria-pressed'),
     })),

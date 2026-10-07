@@ -21,7 +21,8 @@ running — then overlays live reality on top:
 - **Focus paths** — click a node or topic to open its neighborhood below;
   the upper graph keeps every upstream root and downstream path bold in
   blue, including live connections, while unrelated branches dim. Walking
-  the focus panel updates the highlighted paths.
+  the focus panel updates the highlighted paths. The focus graph remembers
+  its own arrangement for each node you return to.
 - **Topic tap** — focus a topic to see its true measured Hz / bandwidth and
   the newest message, via an on-demand best-effort raw (`AnyMsg`)
   subscription that self-releases and is verified not to disturb the

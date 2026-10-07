@@ -391,3 +391,54 @@ def test_live_connections_of_launch_renamed_nodes_use_the_static_node_in_focus_p
     assert "live:/robot/camera_renamed" not in out["elements"]
     assert (_CAMERA_ID, "topic:/diagnostics") in _bold_paths(out)
     assert ("topic:/jetson/image", "live:/jetson_detector") in _bold_paths(out)
+
+
+@pytest.mark.parametrize("feedback", [False, True])
+def test_focus_panel_preserves_main_arrangement_including_feedback(feedback):
+    graph = deepcopy(_PATH_GRAPH)
+    levels = {_PATH_FOCUS: 0, "topic:/input": -1, "topic:/second": -1,
+              "node:demo/relay": -2, "node:demo/root_b": -2,
+              "topic:/output": 1, "node:demo/sink": 2}
+    dual = []
+    if feedback:
+        graph["topics"].append({"name": "/feedback", "msg_type": "std_msgs/String"})
+        graph["edges"].extend([
+            {"source": "node:demo/sink", "target": "topic:/feedback", "kind": "pub"},
+            {"source": "topic:/feedback", "target": _PATH_FOCUS, "kind": "sub"},
+        ])
+        levels["topic:/feedback"] = -1
+        dual = ["node:demo/sink", "topic:/feedback", "topic:/output"]
+    out = _run(_NO_LIVE, graph=graph, egos={
+        _PATH_FOCUS: {"center": _PATH_FOCUS, "levels": levels, "dual": dual},
+    }, actions=[{"kind": "focus", "id": _PATH_FOCUS}])
+    assert out["focus_positions"] == {eid: out["rendered_positions"][eid] for eid in levels}
+    # Unequal upstream path lengths put these inputs in different main columns;
+    # signed-distance placement would collapse them into the same column.
+    assert out["focus_positions"]["topic:/input"]["x"] != out["focus_positions"]["topic:/second"]["x"]
+
+
+def test_focus_panel_uses_dragged_positions_when_opening_and_refocusing():
+    target = "topic:/idle/image"
+    out = _run(_NO_LIVE, graph=_STATIC_GRAPH, egos={
+        _CAMERA_ID: {"center": _CAMERA_ID, "levels": {_CAMERA_ID: 0, target: 1}, "dual": []},
+        target: {"center": target, "levels": {_CAMERA_ID: -1, target: 0}, "dual": []},
+    }, actions=[
+        {"kind": "drag", "id": _CAMERA_ID, "x": -120, "y": 310},
+        {"kind": "focus", "id": _CAMERA_ID},
+        {"kind": "drag", "id": target, "x": 540, "y": -90},
+        {"kind": "focus-click", "id": target},
+    ])
+    assert out["focus_positions"] == {
+        _CAMERA_ID: {"x": -120, "y": 310}, target: {"x": 540, "y": -90},
+    }
+    assert all(pos == out["rendered_positions"][eid]
+               for eid, pos in out["focus_positions"].items())
+
+
+def test_live_only_focus_panel_preserves_current_main_arrangement():
+    target = "topic:/jetson/image"
+    levels = {target: 0, "live:/jetson_camera": -1, "live:/jetson_detector": 1}
+    out = _run(_TWO_MACHINES, egos={
+        target: {"center": target, "levels": levels, "dual": [], "live_only": True},
+    }, actions=[{"kind": "focus", "id": target}])
+    assert out["focus_positions"] == {eid: out["rendered_positions"][eid] for eid in levels}

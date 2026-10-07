@@ -78,6 +78,9 @@ Full commands are in the
 - **Click** a node or topic: splits the page; the bottom **focus panel**
   shows the direct neighborhood — for a node, its topics (±1) and the
   before/after nodes (±2); for a topic, its publishers and subscribers.
+  It starts from the main graph’s current arrangement. Dragged positions in
+  the focus panel are saved per focused element and restored when you return
+  to that element, including after closing and reopening the panel.
   The upper graph displays every upstream root and downstream path in bold
   blue, including declared and live connections, while unrelated branches
   dim. This emphasis follows the focus and clears when the panel closes.
@@ -224,10 +227,11 @@ reloads retain the filter.
   branches stay outside the focused paths. Live endpoint changes refresh
   paths without rearranging existing nodes; launch-renamed nodes retain
   their static identity.
-- **Ego placement:** BFS distance from the focused element, clamped as
-  above. An element reachable both upstream and downstream appears exactly
-  once: the side with the smaller |distance| wins, ties go upstream (the
-  tooltip says so when it happens).
+- **Ego placement:** neighborhood membership uses BFS distance, clamped as
+  above. A new focus starts from the main graph's current positions; panel
+  positions are then saved per focus target and restored on return. An
+  element reachable both upstream and downstream appears exactly
+  once, with a tooltip identifying it as reachable in both directions.
 
 ## Live overlay
 

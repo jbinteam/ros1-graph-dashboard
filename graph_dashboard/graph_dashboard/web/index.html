@@ -194,9 +194,10 @@ let runningIds = new Set();   // static node ids currently running
 let liveTopicIds = new Set(); // static topic ids with live endpoints
 let liveOnlyIds = new Set();  // ids of live-only nodes/topics, synthesized into base
 let hoverId = null;           // preview chain when no focus panel is open
-let mainPos = {};             // current layout coordinates (static + live-only; reused by the panel)
+let mainPos = {};             // current layout coordinates (static + live-only; panel fallback)
 let focusNet = null, focusNodesDS = null;
 let focusId = null, focusEgo = null;
+let focusLayouts = new Map(); // focus id -> positions arranged in its panel
 let hiddenPkgs = new Set();   // package filter (main graph only)
 let selectedMsgTypes = new Set(); // empty = all topic message types
 let liveTopicTypes = new Map();   // latest live types; static types are the fallback
@@ -551,9 +552,9 @@ function restyle() {
 }
 
 // --------------------------------------------------------- focus panel
-// Click-to-open ego view: the clicked element centered, transitive inputs
-// layered left (negative signed distance), outputs right. Levels computed
-// server-side (/api/ego) so the placement rule is unit-tested.
+// Click-to-open ego view: neighborhood membership comes from /api/ego,
+// while coordinates reuse the current main graph arrangement, including
+// manually dragged nodes. Fitting the panel only changes its viewport.
 function restyleFocus() {
   if (!focusId || !focusNodesDS) return;
   const updates = [];
@@ -568,6 +569,11 @@ function restyleFocus() {
   focusNodesDS.update(updates);
 }
 
+function saveFocusLayout() {
+  if (!focusId || !focusNet) return;
+  focusLayouts.set(focusId, focusNet.getPositions());
+}
+
 async function focusOn(id) {
   // base[id] should already exist for anything clickable (static elements
   // from the initial scan, live-only elements synthesized by applyLive —
@@ -575,23 +581,23 @@ async function focusOn(id) {
   if (!base[id]) return;
   const res = await fetch("/api/ego?id=" + encodeURIComponent(id));
   if (!res.ok) return;
-  focusEgo = await res.json();
+  const nextEgo = await res.json();
+  // Preserve the panel's arrangement for each focus target as the user walks
+  // between neighborhoods, then restore it if they return to that target.
+  saveFocusLayout();
+  focusEgo = nextEgo;
   focusId = id;
   const liveOnlyEgo = !!focusEgo.live_only;
 
   const lv = focusEgo.levels;
-  const cols = {};
-  for (const eid of Object.keys(lv)) (cols[lv[eid]] = cols[lv[eid]] || []).push(eid);
-  const fpos = {};
-  for (const l of Object.keys(cols).map(Number)) {
-    // Column order mirrors the main layout's vertical order so the panel
-    // reads like a zoomed excerpt of the big picture.
-    const col = cols[l].sort((a, b) =>
-      ((mainPos[a] || {}).y || 0) - ((mainPos[b] || {}).y || 0) || a.localeCompare(b));
-    col.forEach((eid, i) => {
-      fpos[eid] = { x: l * 240, y: (i - (col.length - 1) / 2) * 85 };
-    });
-  }
+  const egoIds = Object.keys(lv);
+  const currentPos = network.getPositions(egoIds);
+  // Missing coordinates can occur if live discovery changes during the
+  // ego request. Use the cached layout, then the shared layout algorithm.
+  const fallbackPos = computeLayout(egoIds, [...staticEdges, ...liveEdges]);
+  const savedPos = focusLayouts.get(id) || {};
+  const fpos = Object.fromEntries(egoIds.map(eid =>
+    [eid, savedPos[eid] || currentPos[eid] || mainPos[eid] || fallbackPos[eid]]));
   const dual = new Set(focusEgo.dual);
   // Defensive fallback for the (should-be-impossible post-reorder) case of
   // a live-only neighbor not yet synthesized into base — see styleFor().
@@ -607,7 +613,7 @@ async function focusOn(id) {
       shape: m.kind === "topic" ? "box" : "ellipse",
       x: fpos[eid].x, y: fpos[eid].y,
       title: m.title + (dual.has(eid)
-        ? " — reachable both upstream & downstream; drawn on the closer side (tie → upstream)"
+        ? " — reachable both upstream & downstream"
         : ""),
     };
   });
@@ -987,6 +993,7 @@ async function pollTap(id) {
 
 function closeFocus() {
   if (!focusId) return;
+  saveFocusLayout();
   stopTap();
   focusId = null; focusEgo = null; focusNodesDS = null;
   document.getElementById("focuswrap").classList.remove("open");
